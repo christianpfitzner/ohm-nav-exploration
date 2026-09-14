@@ -12,21 +12,41 @@ Yamauchi paper says and where each of its steps lives in this code. This file is
 ```
 ohm_frontier/
   ohm_frontier/frontiers.py       the map and the frontier rules — no ROS in here
-  ohm_frontier/frontier_node.py   the node: /map and /odom in, a NavigateToPose goal out
-  launch/explore.launch.py        simulator + slam_toolbox + nav2 + this node, one command
+  ohm_frontier/frontier_node.py   the node: /map and /odom in, a NavigateToPose goal and the frontiers out
+  ohm_frontier/wall_following.py      \
+  ohm_frontier/obstacle_avoidance.py   > three reactive demos: a lidar and a rule, no map, no planner
+  ohm_frontier/turn_and_move.py      /
+  launch/explore.launch.py        simulator + slam_toolbox + nav2 + RViz + this node, one command
+  launch/explore_<hall>.launch.py one per hall worth showing: rooms, maze, open, arena
+  launch/explore_no_nav2.launch.py the same run with nothing driving — the decisions on their own
+  launch/reactive_<demo>.launch.py hall + one reactive node, for the lecture
   launch/frontier.launch.py       this node alone, for when the rest is already running
   config/slam_toolbox.yaml        the mapper: cell size, when a scan is worth adding, loop closure
   config/nav2_rooms.yaml          nav2 for one simulated robot: frames, topics, costmaps
-  test/                           the frontier rules, and the launch files imported
+  config/explore.rviz             the frontier view: map, lidar, trajectory, plan, every frontier, the chosen one
+  test/                           the frontier rules, the life of a goal, the reactive maths, the launch files
 docs/frontier-exploration.md      the explanation, the paper, and the further readings
+install.sh, INSTALL.md            ./install.sh --check — what a machine has, and what it lacks
 ```
 
 ## Needs
 
-* a checkout of `mecanum-lab` (default `~/git/mecanum-lab`) — the simulator, and the worlds (`rooms`,
-  `maze`, `open`, `arena`, `production`, `track`)
-* `sudo apt install ros-$ROS_DISTRO-navigation2 ros-$ROS_DISTRO-nav2-bringup ros-$ROS_DISTRO-slam-toolbox`
-* built and run on ROS 2 Kilted
+```bash
+./install.sh --check        # what is there, what is missing, what to type about it — installs nothing
+```
+
+That is the list, tested rather than written down: python3 and numpy, a sourced ROS 2, the two launch files
+this package includes (`slam_toolbox`'s and `nav2_bringup`'s), `nav2_msgs`, **`rviz2`**, and a `mecanum-lab`
+checkout new enough to take `tf_tree` and `lidar_no_echo`. Its exit code names which class of thing failed.
+`INSTALL.md` has the options and the two failures people actually hit.
+
+* a checkout of `mecanum-lab` (default `~/git/mecanum-lab`, elsewhere by `sim_dir:=`) — the simulator, and
+  the worlds (`rooms`, `maze`, `open`, `arena`, `production`, `track`)
+* `sudo apt install ros-$ROS_DISTRO-navigation2 ros-$ROS_DISTRO-nav2-bringup ros-$ROS_DISTRO-slam-toolbox
+  ros-$ROS_DISTRO-rviz2`
+* built and run on ROS 2 Kilted. `rviz2` is not part of the ROS base install and the default run opens the
+  view, so a machine without it needs either that line or `rviz:=false`; the launch file looks for it and
+  answers with what to type rather than with a process that died.
 
 ## One command
 
@@ -36,17 +56,37 @@ source install/setup.bash
 ros2 launch ohm_frontier explore.launch.py
 ```
 
-Four things start: the simulator in the `rooms` hall **with its window open** (`explore.launch.py` asks the
-simulator for `headless:=false`), slam_toolbox mapping the lidar, nav2's navigation servers, and this node.
-Other hall, other robot:
+Five things start: the simulator in the `rooms` hall **with its window open** (`headless:=false`),
+slam_toolbox mapping the lidar, nav2's navigation servers, **this package's RViz view** (`rviz:=true`,
+`config/explore.rviz`, installed under `share/ohm_frontier/rviz`), and this node. Other hall, other robot:
 
 ```bash
 ros2 launch ohm_frontier explore.launch.py world:=maze robot:=carlo
 ```
 
-`robot:=` reaches everything because the launch file rewrites every `<robot>/` in `config/*.yaml` at start
-— nav2 and slam_toolbox are handed a *file* and name frames and topics literally in it, so a launch
-argument cannot reach them any other way.
+`robot:=` reaches everything because the launch file rewrites every `<robot>/` in `config/*` at start: nav2
+and slam_toolbox are handed a *file* and name frames and topics literally in it, and RViz is handed a file
+whose displays name `/<robot>/scan` and `/<robot>/odom`, so a launch argument reaches none of them any other
+way. The arguments worth knowing are `world` (rooms | maze | open | arena | production | track), `robot`,
+`headless:=false`, `rviz:=false` for no view, `nav2:=false` for no navigation stack, `rviz_config:=` for
+another view and `sim_dir:=` for a simulator elsewhere; `--show-args` has a sentence for each.
+
+The simulator is never asked for its own RViz, whatever `rviz` says: two viewers with fixed frame `map` is
+one too many, and the one that loses shows an empty map while the other one is right.
+
+### One file per thing worth showing
+
+| command | hall | what it is for |
+| --- | --- | --- |
+| `explore.launch.py` | `rooms` | the whole stack; the defaults above are its defaults |
+| `explore_rooms.launch.py` | `rooms` | 22 × 16 m of walls **with doorways**, so every unentered room is one clump and the ranking has something to choose between |
+| `explore_maze.launch.py` | `maze` | 6 × 6 m of corridor one cell wide: a frontier is a corridor that ends, so the blacklist and `min_frontier_cells` are what is on display |
+| `explore_open.launch.py` | `open` | 30 × 20 m with nothing but its boundary: one frontier, nothing to rank, so the argument is about what a frontier *is*. Run it first, `rooms` second |
+| `explore_arena.launch.py` | `arena` | an empty hall whose painted lanes reflect nothing back to the lidar: the map is what the sensors say, not what the world file says |
+| `explore_no_nav2.launch.py` | `rooms` | `nav2:=false` in a file: no planner, no controller, the goals only on `/frontier_goal` and in RViz — the ranking, the timeout and the blacklist in seconds, with nobody to blame |
+
+Each of those is three lines of substance over `explore.launch.py`, and each docstring says what to watch
+for in that hall.
 
 ## Two things that will otherwise bite you
 
