@@ -82,7 +82,7 @@ def generate_launch_description():
         DeclareLaunchArgument("sim_dir", default_value=_sim_dir(),
                               description="the mecanum-lab checkout, or its installed share directory"),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
-        DeclareLaunchArgument("rviz", default_value="false",
+        DeclareLaunchArgument("rviz", default_value="true",
                               description="let the simulator open its own window as well"),
         DeclareLaunchArgument("slam_params", default_value=config("slam_toolbox.yaml"),
                               description="the mapper; <robot> in it becomes the robot's name"),
@@ -94,7 +94,7 @@ def generate_launch_description():
 
     simulator = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([sim, "launch", "lab.launch.py"])),
-        launch_arguments={"world": LaunchConfiguration("world"), "robot": robot, "headless": "true",
+        launch_arguments={"world": LaunchConfiguration("world"), "robot": robot, "headless": "false",
                           "use_sim_time": sim_time, "rviz": LaunchConfiguration("rviz"),
                           # A mapper needs to hear that a beam did not come back, which the simulator reports
                           # as its range unless told otherwise: see `mecanum_lab/ros_bridge.py`.
