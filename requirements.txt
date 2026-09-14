@@ -1,0 +1,22 @@
+# The python side of this repo — the part that is not an apt package and not ROS.
+#
+# Everything here is also on apt (python3-numpy, python3-pytest, python3-pygame), which is the route a
+# lab machine should take: no ~/.local, no version conflict with what ROS ships. This file is for the
+# machine where apt is not an option, and ./install.sh --pip installs from it.
+#
+# ROS 2 itself is deliberately not here. It is not a pip package: it comes from packages.ros.org, and
+# nav2, slam_toolbox and RViz come from it. ./install.sh --check says which of those is missing.
+
+# frontiers.py counts cells, groups them into clumps and ranks them with numpy, and it is the one import
+# the frontier rules cannot do without — the test suite runs with nothing else but this and pytest.
+numpy>=1.24
+
+# The tests (ohm_frontier/test). Not needed to run a robot. With ROS sourced and a pytest newer than 8,
+# add PYTEST_DISABLE_PLUGIN_AUTOLOAD=1: ROS's own launch_testing plugin has an old hook signature and
+# pytest then refuses to start, which looks like a broken test suite and is not one.
+pytest>=8.0
+
+# The simulator's window. This repo starts no window of its own — the hall, the robot and their view are
+# the simulator's — so this is here because explore.launch.py cannot run without that checkout working,
+# and pygame is the only thing it needs. The simulator's own requirements.txt is the authority on it.
+pygame>=2.5
