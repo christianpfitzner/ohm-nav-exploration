@@ -15,6 +15,9 @@ setup(
         ("share/ohm_frontier", ["package.xml"]),
         (os.path.join("share", "ohm_frontier", "launch"), glob("launch/*.py")),
         (os.path.join("share", "ohm_frontier", "config"), glob("config/*.yaml")),
+        # The RViz view lives beside the parameters but is not a parameter file: `config/*.yaml` would
+        # install it and `rviz:=true` would then look for it under `config/` and find nothing.
+        (os.path.join("share", "ohm_frontier", "rviz"), glob("config/*.rviz")),
     ],
     entry_points={"console_scripts": ["frontier_node = ohm_frontier.frontier_node:main"]},
 )
