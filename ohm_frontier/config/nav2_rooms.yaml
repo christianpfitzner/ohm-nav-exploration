@@ -1,0 +1,179 @@
+# nav2 for one simulated robot in a hall of known size.
+#
+# Only what differs from nav2's own defaults is written here. Two things have to be kept in step with
+# the launch file: the robot name (nav2 names topics and frames absolutely, so `robot:=` and the
+# `muster/` below are the same word) and the frames — the simulator publishes
+# `map → <robot>/odom → <robot>/base_link → <robot>/laser` and its `map` frame is the hall's origin.
+#
+# There is no AMCL and no map_server in this setup: the robot is told where it is by the simulator, and
+# the map comes from the frontier node. `track_unknown_space` is therefore on everywhere — unknown
+# cells are what the whole package is looking for, and a costmap that paints them free would leave the
+# robot no frontier to be sent to.
+
+controller_server:
+  ros__parameters:
+    use_sim_time: True
+    controller_frequency: 20.0
+    odom_topic: /muster/odom
+    progress_checker_plugin: progress_checker
+    goal_checker_plugins: [general_goal_checker]
+    controller_plugins: [FollowPath]
+    progress_checker:
+      plugin: nav2_controller::SimpleProgressChecker
+      required_movement_radius: 0.10        # this much motion in the allowance below is progress
+      movement_time_allowance: 30.0
+    general_goal_checker:
+      plugin: nav2_controller::SimpleGoalChecker
+      xy_goal_tolerance: 0.30
+      yaw_goal_tolerance: 3.14              # a frontier has no right way of facing it
+      stateful: True
+    FollowPath:
+      plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+      desired_linear_vel: 0.35              # the same walking pace the keyboard drives at
+      max_robot_pose_search_dist: 6.0
+      reg_lookahead_dist: 0.50
+      use_collision_detection: True
+    local_costmap:
+      global_frame: odom
+      robot_base_frame: muster/base_link
+      odom_topic: /muster/odom
+      rolling_window: True
+      width: 4
+      height: 4
+      resolution: 0.05
+      track_unknown_space: True
+      plugins: [obstacle_layer, inflation_layer]
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: scan
+        scan:
+          topic: /muster/scan
+          sensor_frame: muster/laser
+          data_type: LaserScan
+          marking: True
+          clearing: True
+          max_range: 8.0
+          expected_update_rate: 10.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.45              # the robot is 0.46 m across, with a little respect left
+        cost_scaling_factor: 5.0
+
+planner_server:
+  ros__parameters:
+    use_sim_time: True
+    expected_planner_frequency: 2.0
+    planner_plugins: [Grid]
+    Grid:
+      plugin: nav2_smac_planner::SmacPlanner2D
+      tolerance: 0.30
+      allow_unknown: True                   # a frontier is the edge of the unknown, by definition
+      downsample_costmap: True
+    global_costmap:
+      global_frame: map
+      robot_base_frame: muster/base_link
+      odom_topic: /muster/odom
+      rolling_window: False
+      always_send_full_costmap: True
+      track_unknown_space: True
+      static_map:
+        map_topic: /map                     # published by the frontier node, not by a map_server
+        subscribe_to_updates: True
+        track_unknown_space: True
+      plugins: [static_layer, obstacle_layer, inflation_layer]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_topic: /map
+        subscribe_to_updates: True
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: scan
+        scan:
+          topic: /muster/scan
+          sensor_frame: muster/laser
+          data_type: LaserScan
+          marking: True
+          clearing: True
+          max_range: 8.0
+          expected_update_rate: 10.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.45
+        cost_scaling_factor: 5.0
+
+behavior_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    use_sim_time: True
+    global_frame: odom
+    robot_base_frame: muster/base_link
+    transform_tolerance: 1.0
+    plugin_lib_names: [nav2_compute_path_to_pose_action_bt_node,
+                       nav2_follow_path_action_bt_node, nav2_back_up_action_bt_node,
+                       nav2_wait_action_bt_node, nav2_drive_on_heading_bt_node]
+    behavior_plugins: [backup, drive_on_heading, wait]
+    backup:
+      plugin: nav2_behaviors::BackUp
+      simulate_ahead_time: 1.0
+    drive_on_heading:
+      plugin: nav2_behaviors::DriveOnHeading
+      simulate_ahead_time: 1.0
+    wait:
+      plugin: nav2_behaviors::Wait
+    local_costmap:
+      global_frame: odom
+      robot_base_frame: muster/base_link
+      rolling_window: True
+      width: 4
+      height: 4
+      resolution: 0.05
+      track_unknown_space: True
+      plugins: [obstacle_layer, inflation_layer]
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: scan
+        scan:
+          topic: /muster/scan
+          sensor_frame: muster/laser
+          data_type: LaserScan
+          marking: True
+          clearing: True
+          max_range: 8.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.45
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: True
+    smoother_plugins: [simple_smoother]
+    simple_smoother:
+      plugin: nav2_smoother::SimpleSmoother
+      tolerance: 1.0e-2
+      max_its: 1000
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: True
+    odom_topic: /muster/odom
+    smoothing_frequency: 20.0
+    max_velocity: [0.40, 0.0, 1.0]          # the model drives these numbers without slipping
+    min_velocity: [-0.30, 0.0, -1.0]
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: True
+    global_frame: map
+    robot_base_frame: muster/base_link
+    odom_topic: /muster/odom
+    bt_loop_duration: 20
+    default_server_timeout: 40
+    wait_for_service_timeout: 1000
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: True
+    loop_rate: 20
+    stop_on_failure: False
