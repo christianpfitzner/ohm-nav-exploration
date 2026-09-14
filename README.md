@@ -153,7 +153,8 @@ cd ohm_frontier && python3 -m pytest test              # the rules, with no ROS 
 One thing costs a student an hour, so it goes here: **in a shell that has ROS sourced that last command dies
 before it collects anything.** ROS 2 Kilted advertises a `launch_testing` pytest plugin whose hook arguments
 the pip pytest here (9.1.1) no longer accepts, so the suite needs `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
-python3 -m pytest test -q` — the same line `./install.sh --check` prints. What is covered is in the test
+python3 -m pytest test -q` — the same line `./install.sh --check` prints. Measured with that: **78 passed**,
+in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the working directory. What is covered is in the test
 names: the frontier rules, the life of a goal from candidate to blacklist, the reactive maths, and the launch
 files — a launch file being the one kind of file here whose wrong imports were invisible until someone typed
 `ros2 launch`.

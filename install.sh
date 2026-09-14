@@ -191,6 +191,16 @@ if [[ -n "$setup" ]]; then
          "sudo apt install ros-$distro-rviz2      (or run it without the view: rviz:=false)"
   fi
 
+  # The three weights are ordinary declared parameters, which means the panel the owner asked for is a
+  # package of its own and nothing more: without it the weights are still live over `ros2 param`, and with it
+  # somebody at the front of a lecture hall can move them with a mouse. Optional, so a note and not a failure.
+  if [[ -d "/opt/ros/$distro/lib/rqt_reconfigure" ]] || command -v rqt_reconfigure >/dev/null 2>&1; then
+    ok "rqt_reconfigure — the panel the frontier weights are declared for"
+  else
+    note "rqt_reconfigure is not installed, so the ranking can be tuned but not with a panel" \
+         "sudo apt install ros-$distro-rqt-reconfigure      (ros2 param set and describe work without it)"
+  fi
+
   apt_command=(sudo apt install -y "ros-$distro-navigation2" "ros-$distro-nav2-bringup"
                "ros-$distro-slam-toolbox" "ros-$distro-rviz2")
   if [[ $do_apt == 1 ]]; then

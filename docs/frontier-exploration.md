@@ -256,7 +256,7 @@ library, not in a chat window.
 | find frontier cells: free next to unknown | `Grid._against_unknown` in [`frontiers.py`](../ohm_frontier/ohm_frontier/frontiers.py) |
 | group them, discard what is too small to be a doorway | `Grid._clumps` and `min_frontier_cells` |
 | choose the frontier to explore by some utility | `Grid.frontiers`: `weight_size × cells/min_frontier_cells + weight_orientation × openness-and-facing + weight_distance × min_goal_distance/distance`, sorted best-first; `Grid._aim` picks the cell inside the clump and `Grid._orientation` the facing term |
-| navigate to it | `FrontierNode.publish` sends a `nav2_msgs/action/NavigateToPose` goal; `/goal_pose` is RViz's button and no nav2 node subscribes to it, which is the mistake the paper's "send it to the navigator" hides |
+| navigate to it | `FrontierNode.publish` sends a `nav2_msgs/action/NavigateToPose` goal; `/goal_pose` is RViz's button and no nav2 node subscribes to it, which is the mistake a step worded as "hand it to the navigator" hides — Xplore is paywalled from here, so this table paraphrases the paper and quotes none of its wording |
 | when a frontier is unreachable, drop it and pick another | `FrontierNode.give_up` (three refusals, because one refusal while `bt_navigator` activates means nothing), `watch_the_current_goal` (`progress_distance` within `goal_timeout_s`), `avoid` with `avoid_radius`, and `drop_goal`, which cancels at the stack instead of only forgetting |
 | keep the plan instead of recomputing it every tick | — the paper does not cover it, and this repo only learned it by watching a robot fail to arrive: `keep_or_switch` and `reselect_margin`, see *Committing to a goal* |
 | stop when no frontiers remain | `FrontierNode.candidates`' empty case, reported once (`said_empty`) rather than twice a second |
@@ -265,10 +265,13 @@ library, not in a chat window.
 Two further readings, both checked:
 
 * **The shipped behaviour tree**, `/opt/ros/kilted/share/nav2_bt_navigator/behavior_trees/`
-  (`navigate_to_pose_w_replanning_and_recovery.xml`). This is what actually happens between "goal sent" and
-  "goal reached" — where the planner is asked again, where `Spin` and `Backup` are tried, and where
-  `distance_travelled` decides that progress has stalled. It answers the question this repo can only ask:
-  who gave up on my goal first.
+  (`navigate_to_pose_w_replanning_and_recovery.xml`), read here on ROS 2 Kilted. This is what actually happens
+  between "goal sent" and "goal reached": the planner is asked again on a `RateController hz="1.0"`, and the
+  recovery round is a `RecoveryNode number_of_retries="6"` around a `RoundRobin` of `Spin` (`spin_dist="1.57"`),
+  `BackUp` (`backup_dist="0.30"`) and `Wait` (`wait_duration="5.0"`). Worth noticing while reading it: there is
+  **no progress or distance term in that tree at all** — nothing in it decides that a goal has stopped being
+  approached. It answers the question this repo can only ask from the outside (who gave up on my goal first),
+  and it is also why `goal_timeout_s` exists in this node rather than being nav2's job.
 * **`/opt/ros/kilted/share/nav2_msgs/action/NavigateToPose.action`** and
   **`/opt/ros/kilted/share/slam_toolbox/config/mapper_params_online_async.yaml`** on any lab machine. The
   first is the interface the frontier node writes to, including the `error_code` values and the
