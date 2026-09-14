@@ -6,6 +6,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -19,8 +20,10 @@ def generate_launch_description():
             parameters=[{
                 "robot": LaunchConfiguration("robot"),
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
-                "min_frontier_cells": LaunchConfiguration("min_frontier_cells"),
-                "avoid_radius": LaunchConfiguration("avoid_radius"),
+                # a launch argument arrives as text, and these two are numbers in the node
+                "min_frontier_cells": ParameterValue(LaunchConfiguration("min_frontier_cells"),
+                                                     value_type=int),
+                "avoid_radius": ParameterValue(LaunchConfiguration("avoid_radius"), value_type=float),
             }],
         ),
     ])

@@ -1,14 +1,17 @@
 # nav2 for one simulated robot in a hall of known size.
 #
-# Only what differs from nav2's own defaults is written here. Two things have to be kept in step with
-# the launch file: the robot name (nav2 names topics and frames absolutely, so `robot:=` and the
-# `muster/` below are the same word) and the frames — the simulator publishes
-# `map → <robot>/odom → <robot>/base_link → <robot>/laser` and its `map` frame is the hall's origin.
+# Only what differs from nav2's own defaults is written here. Two things have to be kept in step with the
+# launch file: the robot name (nav2 names topics and frames absolutely, so `robot:=` and the `muster/`
+# below are the same word — nav2 is not told the name a second time) and the frame names.
 #
-# There is no AMCL and no map_server in this setup: the robot is told where it is by the simulator, and
-# the map comes from the frontier node. `track_unknown_space` is therefore on everywhere — unknown
-# cells are what the whole package is looking for, and a costmap that paints them free would leave the
-# robot no frontier to be sent to.
+# The tree is `slam_map → map → <robot>/odom → <robot>/base_link → <robot>/laser`. Everything from `map`
+# down comes from the simulator, `slam_map` from slam_toolbox, so planning and drawing from the map happen
+# in `slam_map` below. Why the two map frames are two is at the top of launch/explore.launch.py.
+#
+# There is no AMCL and no map_server in this setup: the robot is told where it is by the simulator, and the
+# map is made as it drives. `track_unknown_space` is therefore on everywhere — unknown cells are what the
+# whole package is looking for, and a costmap that paints them free leaves the robot no frontier to be sent
+# to.
 
 controller_server:
   ros__parameters:
@@ -70,20 +73,20 @@ planner_server:
       allow_unknown: True                   # a frontier is the edge of the unknown, by definition
       downsample_costmap: True
     global_costmap:
-      global_frame: map
+      global_frame: slam_map              # slam_toolbox's map, which is the one that grows
       robot_base_frame: muster/base_link
       odom_topic: /muster/odom
       rolling_window: False
       always_send_full_costmap: True
       track_unknown_space: True
       static_map:
-        map_topic: /map                     # published by the frontier node, not by a map_server
+        map_topic: /map             # slam_toolbox makes it, and keeps publishing it
         subscribe_to_updates: True
         track_unknown_space: True
       plugins: [static_layer, obstacle_layer, inflation_layer]
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
-        map_topic: /map
+        map_topic: /map             # slam_toolbox makes it, and keeps publishing it
         subscribe_to_updates: True
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
@@ -165,7 +168,7 @@ velocity_smoother:
 bt_navigator:
   ros__parameters:
     use_sim_time: True
-    global_frame: map
+    global_frame: slam_map              # goals arrive in the map the frontier node read, same frame
     robot_base_frame: muster/base_link
     odom_topic: /muster/odom
     bt_loop_duration: 20
