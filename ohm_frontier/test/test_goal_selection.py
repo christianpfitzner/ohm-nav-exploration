@@ -24,8 +24,7 @@ import pytest
 pytest.importorskip("rclpy", reason="a goal is a node's business; the frontier rules are tested without ROS")
 pytest.importorskip("nav_msgs", reason="the map and the odometry arrive as real messages")
 import rclpy                                                # noqa: E402
-from geometry_msgs.msg import Odometry                      # noqa: E402
-from nav_msgs.msg import OccupancyGrid                      # noqa: E402
+from nav_msgs.msg import Odometry, OccupancyGrid            # noqa: E402
 from rclpy.parameter import Parameter                       # noqa: E402
 
 sys.path.insert(0, ".")
@@ -76,13 +75,20 @@ def a_map(painted, width=8.0, height=6.0, res=RES, frame="slam_map"):
 
     A real message rather than a stand-in because the node's own `on_map` reads it — resolution, origin and
     frame id included — and because the frame is the one thing the markers must not invent.
+
+    The row order comes from the message, not from a picture of the hall: `nav_msgs/msg/OccupancyGrid` documents
+    the data as "row-major order, starting with (0,0)" with the cell above the origin's corner at index
+    `info.width`, so the array's row index *is* the y index. Painting it the way the hall looks on paper —
+    the far row first — mirrors the whole map over the x axis, and every y the node then reports is measured
+    from the far wall: measured here, where the wide opening of `two_openings` came out of the node at
+    y = 2.25, in a wall, instead of at y = 3.75 in the doorway.
     """
     rows, cols = round(height / res), round(width / res)
     cells = [[UNKNOWN_CELLS] * cols for _ in range(rows)]
     for x0, x1, y0, y1, state in painted:
         for row in range(int(y0 / res), int(y1 / res)):
             for col in range(int(x0 / res), int(x1 / res)):
-                cells[rows - 1 - row][col] = state              # rows run upwards from the origin
+                cells[row][col] = state                       # row 0 is the row the origin is in
     message = OccupancyGrid()
     message.header.frame_id = frame
     message.info.resolution, message.info.width, message.info.height = res, cols, rows
@@ -268,11 +274,11 @@ def test_a_goal_the_node_dropped_is_cancelled_at_the_stack(node):
     first = a_frontier(4.0, 4.0, cells=12, score=1.0)
     offered(node, first)
     node.on_timer()
-    node.handle = RefusedHandle()
+    node.goal_handle = RefusedHandle()
     offered(node, a_frontier(1.0, 1.0, cells=40, score=3.0))
     clock.advance(0.5)
     node.on_timer()
-    assert node.handle is None and True
+    assert node.goal_handle is None and True
     assert node.goal.x == 1.0
 
 
@@ -282,10 +288,10 @@ def test_a_dropped_goal_is_cancelled_and_the_cancel_reaches_the_stack(node):
     offered(node, first)
     node.on_timer()
     handle = RefusedHandle()
-    node.handle = handle
+    node.goal_handle = handle
     node.drop_goal()
     assert handle.cancelled, "the node forgot its goal and left the stack driving to it"
-    assert node.goal is None and node.handle is None
+    assert node.goal is None and node.goal_handle is None
 
 
 def test_a_late_word_from_the_stack_is_answered_to_the_goal_it_was_about(node):
