@@ -8,6 +8,7 @@ files are imported, run, and their described processes counted.
     python3 -m pytest test          # skipped here if `launch` is not installed
 """
 import importlib.util
+import os
 import pathlib
 
 import pytest
@@ -18,11 +19,19 @@ pytest.importorskip("launch", reason="these tests import the launch files, which
 pytest.importorskip("launch_ros", reason="these tests import the launch files, which need ROS 2")
 from ament_index_python.packages import PackageNotFoundError  # noqa: E402
 from launch.actions import IncludeLaunchDescription  # noqa: E402
+from launch.launch_context import LaunchContext  # noqa: E402
 from launch_ros.actions import Node  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parents[1]
 SHARES = {"ohm_frontier": "/opt/fake/ohm_frontier", "mecanum_lab": "/opt/fake/mecanum_lab",
           "nav2_bringup": "/opt/fake/nav2_bringup", "slam_toolbox": "/opt/fake/slam_toolbox"}
+
+
+def context_with(configurations):
+    """A launch context that answers launch arguments, for the part of a launch file that runs later."""
+    context = LaunchContext(argv=[])
+    context.launch_configurations.update(configurations)      # as `robot:=carlo` would have done
+    return context
 
 
 def launch_file(name, monkeypatch, installed=()):
@@ -57,16 +66,45 @@ def test_the_launch_files_import_at_all():
         assert not offenders, f"{name} imports {offenders}"
 
 
-def test_the_explore_launch_file_describes_four_processes(monkeypatch):
+def test_the_explore_launch_file_describes_the_whole_run(monkeypatch):
     module = launch_file("explore.launch.py", monkeypatch,
-                         installed=("ohm_frontier", "nav2_bringup"))
+                         installed=("ohm_frontier", "nav2_bringup", "slam_toolbox"))
     entities = module.generate_launch_description().entities
-    included = [e for e in entities if isinstance(e, IncludeLaunchDescription)]
-    nodes = [e for e in entities if isinstance(e, Node)]
     declared = [e for e in entities if type(e).__name__ == "DeclareLaunchArgument"]
-    assert len(declared) >= 6, "robot, world, sim_dir, use_sim_time, rviz, slam_params, nav2_params"
-    assert len(included) == 2, f"the simulator and nav2 are included, got {len(included)}"
-    assert len(nodes) == 2, f"slam_toolbox and the frontier node are started, got {len(nodes)}"
+    assert len(declared) >= 7, "robot, world, sim_dir, use_sim_time, rviz, slam_params, nav2_params"
+    assert len([e for e in entities if isinstance(e, Node)]) == 1, "the frontier node is the only node here"
+    # the other three processes come as included launch files; two of them only after the robot's name is
+    # known, because their parameters live in a file the name has to be written into
+    assert len([e for e in entities if isinstance(e, IncludeLaunchDescription)]) == 1
+    assert len([e for e in entities if type(e).__name__ == "OpaqueFunction"]) == 1
+    slam_template, nav2_template = (os.path.join(str(HERE), "config", n)
+                                    for n in ("slam_toolbox.yaml", "nav2_rooms.yaml"))
+    built = module.started_by_name(context_with({"robot": "carlo"}), slam_template, nav2_template, "true")
+    assert len([e for e in built if isinstance(e, IncludeLaunchDescription)]) == 2, \
+        "slam_toolbox and nav2 have to arrive once the name is known, too"
+
+
+def test_the_simulator_is_asked_for_the_tree_that_leaves_the_top_edge_to_the_mapper(monkeypatch):
+    """`map → <robot>/odom` may have one publisher. That the simulator is the one standing down is the
+    whole arrangement, so a launch file that stops asking for it would silently break the map."""
+    module = launch_file("explore.launch.py", monkeypatch,
+                         installed=("ohm_frontier", "nav2_bringup", "slam_toolbox"))
+    simulator = [e for e in module.generate_launch_description().entities
+                 if isinstance(e, IncludeLaunchDescription)][0]
+    assert dict(simulator.launch_arguments).get("tf_tree") == "slam", dict(simulator.launch_arguments)
+
+
+def test_the_robot_name_reaches_the_parameter_files_it_has_to_be_in(monkeypatch):
+    """nav2 and slam_toolbox are given a file, not parameters, and name frames absolutely: `robot:=carlo`
+    is worth nothing unless the file they read says carlo too."""
+    module = launch_file("explore.launch.py", monkeypatch, installed=("ohm_frontier",))
+    for name in ("nav2_rooms.yaml", "slam_toolbox.yaml"):
+        template = os.path.join(str(HERE), "config", name)
+        assert "<robot>" in open(template).read(), f"{name} has no <robot> to substitute"
+        assert not [line for line in open(template) if "muster/" in line and not line.lstrip().startswith("#")], \
+            f"{name} carries a baked-in robot name"
+        filled = open(module.written(template, "carlo")).read()
+        assert "<robot>" not in filled and "carlo/base_link" in filled, name
 
 
 def test_the_frontier_launch_file_starts_one_node_alone(monkeypatch):

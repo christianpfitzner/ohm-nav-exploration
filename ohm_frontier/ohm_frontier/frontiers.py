@@ -21,7 +21,7 @@ is unknown as well, because nothing has been seen there. A frontier rule of "fre
 cannot tell those apart and stops finding rooms after the first minute.
 """
 from collections import namedtuple
-from math import atan2, hypot
+from math import atan2, cos, hypot, sin
 
 import numpy as np
 
@@ -30,6 +30,22 @@ AIM_WINDOW = 3          # cells around a goal that are counted for wall proximit
 NEIGHBOURS = [(dr, dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1) if (dr, dc) != (0, 0)]
 
 Frontier = namedtuple("Frontier", "x y heading cells distance score")
+
+
+def to_frame(pose: tuple, transform) -> tuple:
+    """A pose in a frame, moved into the frame a `geometry_msgs/Transform` describes as its parent.
+
+    Used for the robot's odometry pose and the SLAM map: `/map` and `<robot>/odom` are apart by exactly the
+    correction the mapper makes for the odometry drifting, which is centimetres in a well-behaved simulator
+    and metres in the exercises where the odometry is deliberately ruined. Comparing a map cell with an
+    odometry position without that correction is comparing two places.
+    """
+    q, t = transform.rotation, transform.translation
+    yaw = 2.0 * atan2(q.z, q.w)                             # the world is flat: yaw only
+    x, y = pose[0], pose[1]
+    return (t.x + cos(yaw) * x - sin(yaw) * y,
+            t.y + sin(yaw) * x + cos(yaw) * y,
+            pose[2] + yaw)
 
 
 class Grid:
@@ -105,8 +121,14 @@ class Grid:
             groups.append(clump)
         return groups
 
-    def _aim(self, clump):
+    def _aim(self, clump, robot: tuple = None, min_distance: float = 0.0):
         """Which cell of a clump to drive at: the one with the least wall around it.
+
+        `robot` and `min_distance` narrow the candidates first. A frontier that runs around the robot — the
+        shape of the first minute of every mapping run, and with no wall mapped yet the rule below has
+        nothing to choose by — has its best cell under the robot, where a planner can only spin. Choosing
+        among the cells far enough away keeps this rule meaningful instead of quietly throwing a whole room
+        away, which is what a goal 0.18 m away once did.
 
         Not the centroid. A clump that bends around the corner of a wall, or rings a pillar, has its
         middle *in* the wall, and a goal inside an obstacle is not a slow goal but a refused one — after
@@ -126,8 +148,16 @@ class Grid:
             return (total[row + span, col + span] - total[row, col + span]
                     - total[row + span, col] + total[row, col])
 
-        middle = np.array(clump).mean(axis=0)
-        return min(clump, key=lambda rc: (nearby(*rc), abs(rc[0] - middle[0]) + abs(rc[1] - middle[1])))
+        reachable = [rc for rc in clump if self._gap(rc, robot) >= min_distance] if robot is not None \
+            else clump
+        candidates = reachable or clump                 # if all of it is underfoot, let it be rejected below
+        middle = np.array(candidates).mean(axis=0)
+        return min(candidates, key=lambda rc: (nearby(*rc), abs(rc[0] - middle[0])
+                                               + abs(rc[1] - middle[1])))
+
+    def _gap(self, rc: tuple, robot: tuple) -> float:
+        x, y = self.metres(rc[0], rc[1])
+        return hypot(x - robot[0], y - robot[1])
 
     def frontiers(self, robot: tuple, min_cells: int = 12, min_distance: float = 0.45,
                   avoid: list | None = None, avoid_radius: float = 0.75) -> list:
@@ -142,7 +172,7 @@ class Grid:
         for clump in self._clumps(edge):
             if len(clump) < min_cells:
                 continue                                        # a crack, not a room
-            row, col = self._aim(clump)
+            row, col = self._aim(clump, robot, min_distance)
             x, y = self.metres(row, col)
             distance = hypot(x - robot[0], y - robot[1])
             if distance < min_distance:
@@ -154,3 +184,34 @@ class Grid:
                                   cells=len(clump), distance=distance,
                                   score=len(clump) / max(distance, 0.1)))
         return sorted(found, key=lambda f: -f.score)
+
+    def walk_out(self, robot: tuple, reach: float = 4.0, avoid: list | None = None,
+                 avoid_radius: float = 0.75) -> Frontier | None:
+        """The farthest cell the map calls free, no further away than `reach` — a goal for the first minute.
+
+        A frontier is only a goal when it is out of reach of the robot's own wheels. At the start of a
+        mapping run that is exactly when there is nothing to choose: the mapper has painted a metre of floor
+        around the robot, every frontier cell lies inside it, and a planner asked for a goal half a metre
+        ahead makes the robot spin where it stands — measured: no goal left the node at all, so the robot
+        never moved and the map never grew, which is how a deadlock looks from the outside.
+
+        So the first goal is not the interesting place but any place the map already says the robot may go.
+        Unknown cells are not candidates, which is what keeps this out of the walls, and the blacklist is
+        honoured, so a robot that was written off a spot does not walk back into it.
+        """
+        rows, cols = np.nonzero(self.cells == FREE)
+        if not len(rows):
+            return None
+        x = self.origin[0] + (cols + 0.5) * self.res
+        y = self.origin[1] + (rows + 0.5) * self.res
+        distance = np.hypot(x - robot[0], y - robot[1])
+        order = np.argsort(-distance)
+        for n in order:
+            if distance[n] > reach:                           # sorted: everything after this is further too
+                continue
+            if any(hypot(x[n] - a[0], y[n] - a[1]) < avoid_radius for a in avoid or []):
+                continue
+            return Frontier(x=float(x[n]), y=float(y[n]),
+                            heading=atan2(y[n] - robot[1], x[n] - robot[0]),
+                            cells=0, distance=float(distance[n]), score=0.0)
+        return None

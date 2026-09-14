@@ -7,6 +7,7 @@ Run from the package directory:
 `frontiers.py` imports no ROS, so these need no ROS either — the map is built by hand, cell by cell, the
 way a student would draw it on paper.
 """
+from math import cos, hypot, pi, sin
 import sys
 from types import SimpleNamespace
 
@@ -14,7 +15,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, ".")
-from ohm_frontier.frontiers import FREE, OCCUPIED, UNKNOWN, Frontier, Grid  # noqa: E402
+from ohm_frontier.frontiers import FREE, OCCUPIED, UNKNOWN, Frontier, Grid, to_frame  # noqa: E402
 
 RES = 0.5
 
@@ -172,3 +173,69 @@ def test_a_frontier_comes_with_the_heading_that_faces_into_it():
     for f in found:
         assert np.arctan2(f.y - 0.75, f.x - 0.75) == pytest.approx(f.heading, abs=1e-6), \
             "nose-first: the first new scan then looks into the unknown instead of behind"
+
+
+def test_a_frontier_around_the_robot_gives_a_goal_in_front_of_it():
+    """The first minute of every mapping run: a disc of free floor around the robot, unknown beyond it, and
+    — until a beam has hit something — no wall in the map at all. The clump is the whole ring, its middle is
+    under the robot, and a goal under the robot is no goal at all."""
+    grid = Grid(6.0, 6.0, 0.1)
+    centre = (3.0, 3.0)
+    for row in range(grid.cells.shape[0]):
+        for col in range(grid.cells.shape[1]):
+            x, y = grid.metres(row, col)
+            if hypot(x - centre[0], y - centre[1]) < 1.2:
+                grid.cells[row, col] = FREE
+    found = grid.frontiers(robot=centre, min_cells=20, min_distance=0.45)
+    assert found, "a ring of unexplored floor around the robot is a frontier, not a reason to do nothing"
+    assert min(hypot(f.x - centre[0], f.y - centre[1]) for f in found) >= 0.45, (
+        "the goal has to be somewhere the robot is not standing")
+
+
+def a_transform(x, y, yaw):
+    """A `geometry_msgs/Transform` saying: this is where the child frame sits inside the parent."""
+    return SimpleNamespace(translation=SimpleNamespace(x=x, y=y, z=0.0),
+                           rotation=SimpleNamespace(x=0.0, y=0.0, z=sin(yaw / 2), w=cos(yaw / 2)))
+
+
+def test_a_pose_from_the_odometry_arrives_in_the_frame_the_map_is_in():
+    """`/map` and `<robot>/odom` are apart by whatever the mapper corrects for the odometry drifting.
+    Comparing a map cell with an odometry position without that correction compares two places, not one."""
+    assert to_frame((1.0, 0.0, 0.5), a_transform(0.0, 0.0, 0.0)) == pytest.approx((1.0, 0.0, 0.5))
+    assert to_frame((1.0, 0.0, 0.5), a_transform(2.0, 3.0, 0.0)) == pytest.approx((3.0, 3.0, 0.5))
+    turned = to_frame((1.0, 0.0, 0.0), a_transform(0.0, 0.0, pi / 2))
+    assert (turned[0], turned[1], turned[2]) == pytest.approx((0.0, 1.0, pi / 2), abs=1e-9)
+
+
+def spawn_pocket():
+    """One metre of known floor around a robot that has just been set down, unknown everywhere else.
+
+    This is the map a mapper publishes in the first seconds of a run: the robot has not moved yet, so the
+    only floor it has validated is the floor under it.
+    """
+    grid = Grid(10.0, 10.0, RES)
+    paint(grid, 4.5, 5.5, 4.5, 5.5, FREE)                  # the metre of known floor
+    paint(grid, 4.0, 4.5, 4.0, 6.0, OCCUPIED)              # a wall the lidar did reach
+    return grid
+
+
+def test_a_frontier_under_the_wheels_is_no_goal_but_a_walk_out_is():
+    grid, robot = spawn_pocket(), (5.0, 5.0)
+    assert grid.frontiers(robot=robot, min_distance=1.2) == []     # everything known is underfoot
+    stroll = grid.walk_out(robot, reach=4.0)
+    assert stroll is not None and stroll.cells == 0                # not a frontier, just a place to go
+    assert 0.35 < stroll.distance <= 4.0                           # far enough to drive, near enough to be known
+    row, col = int(stroll.y / grid.res), int(stroll.x / grid.res)
+    assert grid.cells[row, col] == FREE                            # never a step into the unknown
+
+
+def test_a_walk_out_stops_at_its_reach_and_walks_around_the_written_off():
+    grid = Grid(20.0, 10.0, RES)
+    paint(grid, 1.0, 9.0, 4.5, 5.5, FREE)                          # a corridor, mapped as far as 9 m
+    robot = (1.0, 5.0)
+    near = grid.walk_out(robot, reach=2.0)
+    assert 1.0 <= near.distance <= 2.0 + RES                       # the reach is the reach, not a suggestion
+    far = grid.walk_out(robot, reach=8.0)
+    assert far.distance > 7.0                                      # with room to walk, it walks
+    again = grid.walk_out(robot, reach=8.0, avoid=[(far.x, far.y)], avoid_radius=1.0)
+    assert hypot(again.x - far.x, again.y - far.y) >= 1.0           # the end of the corridor is written off

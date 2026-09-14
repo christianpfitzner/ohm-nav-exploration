@@ -3,31 +3,32 @@
     ros2 launch ohm_frontier explore.launch.py
     ros2 launch ohm_frontier explore.launch.py world:=maze robot:=carlo
 
-Nothing in the simulator is changed or started differently for this: it already publishes `/scan`,
-`/odom` and the tf tree, and that is all SLAM and nav2 ask a robot for.
+Nothing in the simulator is changed or started differently for this. What it does need is one word about
+tf, because both it and a mapping node want to publish the same edge:
 
-**The one thing that took thought: who publishes `map → <robot>/odom`.** The simulator publishes it
-(`mecanum_lab/tf_bcast.py`, and the parent name `map` is fixed there — by intent, because `map →
-base_link` being the drifting odometry is the point of the Kalman lab). slam_toolbox wants to publish that
-same edge, and a frame with two parents is not a tf tree, so one of the two has to move. The simulator
-does not move for anyone, so slam_toolbox gets the odd job instead:
+    map  →  <robot>/odom  →  <robot>/base_link  →  <robot>/laser
+     slam       sim                sim                  sim
 
-    slam_map  →  map  →  <robot>/odom  →  <robot>/base_link  →  <robot>/laser
-      slam       sim         sim              sim                     sim
+By default the simulator publishes `map → <robot>/odom` as well — `map → base_link` being the drifting
+odometry is what its Kalman lab is built on. Two publishers on that one edge would give `<robot>/odom` two
+parents, and a tf tree with two parents is not a tree, so this launch file asks for the other tree with
+`tf_tree:=slam` (`--set tf.tree=slam` on the command line, `mecanum_lab/tf_bcast.py` implementing it). The
+simulator then publishes from `<robot>/odom` down and calls the frame of its own hall coordinates `hall` —
+not `map`, because a mapper anchors `map` wherever its first scan found the robot, which is not the corner
+of the hall that GPS and truth positions are measured from.
 
-`odom_frame: map` hands slam_toolbox the hall frame as its odometry reference — which is what an odometry
-frame is for a real robot anyway, a pose that drifts — and slam_toolbox then publishes its own frame above
-it. `map → base_link` stays the students' drifting odometry, `slam_map → base_link` is the SLAM answer, and
-everything that plans or draws from the map uses `slam_map`. That is also the frame the frontier node reads
-out of the map message rather than assuming, and what `config/nav2_rooms.yaml` is written for.
+The frontier node reads the frame out of the map message instead of assuming any of this, so it does not
+care which tree it is given.
 """
 import os
+import tempfile
 
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
 from launch_ros.actions import Node
 
 #: where the simulator lives when it is not installed as a ROS package
@@ -50,6 +51,20 @@ def share(package: str, why: str = "") -> str:
             f" sudo apt install ros-$ROS_DISTRO-{package}")
 
 
+def written(template: str, robot: str) -> str:
+    """The parameter file of `template` with the robot's name in it, as a path nav2 can be given.
+
+    Both nav2 and slam_toolbox are handed a *file* and name frames and topics absolutely inside it, so
+    `robot:=` cannot reach them as a launch argument — the name has to be in the file. Every `<robot>/` in
+    `config/*.yaml` is therefore replaced here, which keeps one setting for the whole stack instead of a
+    file to edit per robot. Rewritten on every start, so the file in this checkout stays the truth.
+    """
+    text = open(template).read().replace("<robot>", robot)
+    out = os.path.join(tempfile.gettempdir(), f"ohm_frontier_{robot}_{os.path.basename(template)}")
+    open(out, "w").write(text)
+    return out
+
+
 def _sim_dir() -> str:
     """Where `launch/lab.launch.py` is: the installed package if there is one, the checkout otherwise."""
     try:
@@ -60,6 +75,7 @@ def _sim_dir() -> str:
 
 def generate_launch_description():
     frontiers = share("ohm_frontier")
+    config = lambda name: os.path.join(frontiers, "config", name)          # noqa: E731
     arguments = [
         DeclareLaunchArgument("robot", default_value="muster"),
         DeclareLaunchArgument("world", default_value="rooms", description="hall of the simulator to map"),
@@ -68,38 +84,21 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="false",
                               description="let the simulator open its own window as well"),
-        DeclareLaunchArgument("slam_params", default_value=os.path.join(frontiers, "config",
-                                                                        "slam_toolbox.yaml")),
-        DeclareLaunchArgument("nav2_params", default_value=os.path.join(frontiers, "config",
-                                                                        "nav2_rooms.yaml")),
+        DeclareLaunchArgument("slam_params", default_value=config("slam_toolbox.yaml"),
+                              description="the mapper; <robot> in it becomes the robot's name"),
+        DeclareLaunchArgument("nav2_params", default_value=config("nav2_rooms.yaml"),
+                              description="nav2; <robot> in it becomes the robot's name"),
     ]
+
     robot, sim, sim_time = (LaunchConfiguration(n) for n in ("robot", "sim_dir", "use_sim_time"))
 
     simulator = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([sim, "launch", "lab.launch.py"])),
-        launch_arguments={"world": LaunchConfiguration("world"), "robot": robot,
-                          "headless": "true", "use_sim_time": sim_time,
-                          "rviz": LaunchConfiguration("rviz")}.items(),
-    )
-
-    slam = Node(
-        package="slam_toolbox", executable="async_slam_toolbox_node", name="slam_toolbox",
-        output="screen",
-        parameters=[LaunchConfiguration("slam_params"), {
-            "use_sim_time": sim_time,
-            "map_frame": "slam_map",            # the frame above the simulator's, see module docstring
-            "odom_frame": "map",
-            "base_frame": [robot, "/base_link"],
-            "scan_topic": ["/", robot, "/scan"],
-            "senser": {"topic": ["/", robot, "/scan"]},   # the same setting under the newer name
-        }],
-    )
-
-    navigation = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(share("nav2_bringup"), "launch",
-                                                   "navigation_launch.py")),
-        launch_arguments={"params_file": LaunchConfiguration("nav2_params"),
-                          "use_sim_time": sim_time}.items(),
+        launch_arguments={"world": LaunchConfiguration("world"), "robot": robot, "headless": "true",
+                          "use_sim_time": sim_time, "rviz": LaunchConfiguration("rviz"),
+                          # A mapper needs to hear that a beam did not come back, which the simulator reports
+                          # as its range unless told otherwise: see `mecanum_lab/ros_bridge.py`.
+                          "tf_tree": "slam", "lidar_no_echo": "inf"}.items(),
     )
 
     frontiers_node = Node(
@@ -107,4 +106,31 @@ def generate_launch_description():
         parameters=[{"robot": robot, "use_sim_time": sim_time}],
     )
 
-    return LaunchDescription(arguments + [simulator, slam, navigation, frontiers_node])
+    # The two includes whose parameters live in a file, and a file has to carry the robot's name in it —
+    # which is only known once the launch arguments are resolved. `OpaqueFunction` is launch's way of
+    # saying "build these later", so the name is asked for here instead of being guessed at the top.
+    named = OpaqueFunction(function=started_by_name, args=[LaunchConfiguration("slam_params"),
+                                                           LaunchConfiguration("nav2_params"), sim_time])
+
+    return LaunchDescription(arguments + [simulator, named, frontiers_node])
+
+
+def started_by_name(context, *args, **kwargs):
+    """The slam_toolbox and nav2 includes, with the robot's name written into the files they read."""
+    read = lambda given: perform_substitutions(                      # noqa: E731
+        context, normalize_to_list_of_substitutions(given))
+    robot, sim_time = read(LaunchConfiguration("robot")), read(args[2])
+    slam_template, nav2_template = written(read(args[0]), robot), written(read(args[1]), robot)
+
+    # slam_toolbox's own launch file rather than its executable: it is a lifecycle node, and starting the
+    # executable alone leaves it „unconfigured" and silent, which looks exactly like a wrong scan topic.
+    return [
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(share("slam_toolbox", "the mapper"), "launch",
+                                                       "online_async_launch.py")),
+            launch_arguments={"slam_params_file": slam_template, "use_sim_time": sim_time}.items()),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(share("nav2_bringup", "the navigation stack"),
+                                                       "launch", "navigation_launch.py")),
+            launch_arguments={"params_file": nav2_template, "use_sim_time": sim_time}.items()),
+    ]

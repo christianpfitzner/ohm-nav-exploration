@@ -1,13 +1,13 @@
 # ohm-nav-exploration
 
 Frontier-based exploration on top of the [mecanum-lab](../mecanum-lab) simulator. One ROS 2 Python package
-that looks at the map, decides which unexplored place to drive to next, and hands that place to the
-navigation stack. Mapping is slam_toolbox's job, driving is nav2's, the simulator is used as it is.
+that reads the map, decides which unexplored place to drive to next, and hands that place to the navigation
+stack. Mapping is slam_toolbox's job, driving is nav2's, the simulator is used as it is.
 
 ```
 ohm_frontier/
   ohm_frontier/frontiers.py       the map and the frontier rules — no ROS in here
-  ohm_frontier/frontier_node.py   the node: /map and /odom in, /goal_pose out
+  ohm_frontier/frontier_node.py   the node: /map and /odom in, a NavigateToPose goal out
   launch/explore.launch.py        simulator + slam_toolbox + nav2 + this node, one command
   launch/frontier.launch.py       this node alone, for when the rest is already running
   config/slam_toolbox.yaml        the mapper: cell size, when a scan is worth adding, loop closure
@@ -34,47 +34,68 @@ source install/setup.bash
 ros2 launch ohm_frontier explore.launch.py
 ```
 
-That starts four things: the simulator in `rooms` (headless, 22 × 16 m), slam_toolbox mapping its lidar,
-nav2's navigation servers, and this node. Other hall, other robot:
+That starts four things: the simulator in `rooms` (headless), slam_toolbox mapping its lidar, nav2's
+navigation servers, and this node. Other hall, other robot:
 
 ```bash
 ros2 launch ohm_frontier explore.launch.py world:=maze robot:=carlo
 ```
 
-`robot:=` also has to match the robot name written into `config/nav2_rooms.yaml`, because nav2 names its
-topics and frames absolutely.
+`robot:=` reaches everything: the same name is written into `config/nav2_rooms.yaml` and
+`config/slam_toolbox.yaml` at launch time, because those two are files and nav2 reads them literally.
 
 ### Who publishes which tf frame
 
 ```
-slam_map  →  map  →  muster/odom  →  muster/base_link  →  muster/laser
-  slam       sim         sim              sim                    sim
+map  →  muster/odom  →  muster/base_link  →  muster/laser
+ slam         sim              sim                 sim
 ```
 
-The simulator publishes `map → <robot>/odom` itself and always will — `map → base_link` being the drifting
-odometry is the point of its Kalman lab. slam_toolbox wants to publish that same edge, and a frame with two
-parents is not a tf tree, so slam_toolbox is given the hall frame as its odometry reference (`odom_frame:
-map`) and publishes its own frame above it. `slam_map` is what plans and draws from the map, and it is the
-frame this node reads out of the map message rather than assuming. Details in
-`launch/explore.launch.py`.
+The simulator normally publishes this whole tree, `map` being its hall. Here it is told to keep off the top
+edge — `tf_tree:=slam`, which is `--set tf.tree=slam` in `mecanum_lab/tf_bcast.py` — and then it calls the
+hall's own coordinate frame `hall` instead of `map`. A mapper and the simulator both publishing
+`map → <robot>/odom` would give `odom` two parents, which is not a tree; nav2's costmap answers that with
+`frame does not exist` rather than with a map. What plans and draws is the frame named in the map message,
+which this node reads out instead of assuming.
+
+Positions the simulator measures from the corner of its hall — GPS, truth — are in `hall`, and are not the
+coordinates this node works in.
+
+### The lidar's missing echo
+
+The simulator reports a beam that did not come back as the laser's own range, 8.0 m, which is what every
+laboratory there measures. slam_toolbox cannot use that: a reading at its `max_laser_range` is not "the
+space beyond is open". So the launch file also passes `lidar_no_echo:=inf`
+(`--set sensor.lidar.no_echo=inf`, `mecanum_lab/ros_bridge.py`), which is what
+`sensor_msgs/msg/LaserScan` documents.
 
 ## What the node does
 
-* Subscribes `/map` (slam_toolbox's, growing as it maps) and `<robot>/odom`. It publishes no map: two
-  mappers in one graph means two answers to "what does the hall look like".
+* Subscribes `/map` (slam_toolbox's, growing as it maps) and `<robot>/odom`, and turns the odometry pose
+  into the map's frame before comparing the two — measured 0.18 m apart at spawn, which was already enough
+  to put a goal under the robot's own wheels. It publishes no map: two mappers in one graph means two
+  answers to "what does the hall look like".
 * Looks for free cells with an unknown cell next to them, groups them into clumps, and ranks the clumps by
   **cells per unit distance** — the wide opening down the hall beats the crack beside the wheel.
 * Aims at the cell of the clump with the least wall around it, not at the clump's centroid. A clump that
-  bends around a corner has its middle in that corner, and a goal inside a wall is refused by every
-  planner.
-* Publishes the winner on `/goal_pose`, nose pointed away from where it came from, so the first new scan
-  looks into the unknown.
-* Watches it. Arrived, or never moved towards, or too slow, and the place goes on a blacklist and the next
-  clump gets its turn. With nothing left it says so once and stops.
+  bends around a corner or rings a pillar has its middle *in* the wall, and a goal inside a wall is not a
+  slow goal but a refused one.
+* Sends the winner to nav2 as a `nav2_msgs/action/NavigateToPose` goal, nose pointed away from where it came
+  from so the first new scan looks into the unknown. **nav2 does not read a `/goal_pose` topic** — that one
+  is RViz's button, not an interface. The same pose is published on `/frontier_goal` for a display and for a
+  run without nav2.
+* Watches it. Arrived, or never moved towards, or too slow. One refusal is not a verdict — a goal that
+  leaves while nav2 is still activating is answered `not accepted` within a millisecond, so a place has to
+  be refused three times before it goes on the blacklist. Then the next clump gets its turn, and with
+  nothing left the node says so once and stops.
+* When nothing on the map is far enough away to be a goal — which at the start of a run is the whole map,
+  because the map is a metre across — it walks to the farthest cell the map calls free instead of standing
+  still. That is `walk_out` in `frontiers.py`, and the reason it exists is that a mapper only adds a scan
+  once the robot has moved 0.2 m: a robot that shuffles 0.2 m at a time never gives it the reason to.
 
 Parameters worth touching: `min_frontier_cells` (12 — under that a clump is a gap between two beams, not a
-room), `min_goal_distance` (0.45 m), `avoid_radius` (0.75 m), `reached_distance` (0.35 m), `stall_s` (25 s),
-`patience_s` (120 s).
+room), `min_goal_distance` (0.7 m), `walk_out_reach` (4 m), `avoid_radius` (0.75 m), `reached_distance`
+(0.35 m), `stall_s` (25 s), `patience_s` (120 s).
 
 ## Without nav2, and tests
 
@@ -92,23 +113,38 @@ and the frontier rules are checked without ROS at all:
 python3 -m pytest test
 ```
 
-14 tests: the three states of a map read as its own convention says (`-1` unknown, `0` free), the map's
-origin carried all the way to the goal, a frontier at the edge of a growing map still being a frontier, the
-wide opening beating the near crack, goals not being aimed at a wall or at the robot's own doorstep, the
-blacklist giving the next clump its turn — and both launch files being imported, which is a test because a
-wrong import in a launch file is invisible until someone types `ros2 launch`.
+20 passed with ROS in the environment, 14 passed and 1 skipped without it: the three states of a map read
+as its own convention says (`-1` unknown, `0` free), the map's origin carried all the way to the goal, a
+frontier at the edge of a growing map still being a frontier, the wide opening beating the near crack,
+goals not being aimed at a wall or at the robot's own doorstep, a frontier all of whose cells are underfoot
+producing a goal at least `min_goal_distance` away, a walk-out goal that stops at its reach and walks around
+what is written off, and both launch files being imported — a test because a wrong import in a launch file
+is invisible until someone types `ros2 launch`.
 
 ## What has been run, and what has not
 
-Run: the 14 tests, and the node against the simulator with a stand-in mapper (lidar beams painted into a
-growing `/map`) and a stand-in driver in place of nav2. 17 goals, every one of them on a cell its own map
-called free, 3 reached, 58 % of the hall's floor known afterwards.
+Run, with slam_toolbox and nav2 on ROS 2 Kilted:
 
-Not run: slam_toolbox and nav2 — neither is installed on the machine this was written on. The parameters in
-`config/` are written against their documented defaults, not against a run. Two things to expect:
+* The whole stack comes up, every nav2 lifecycle node configured and activated, and the frontier node's
+  goals are accepted and driven: a goal 0.2 m away was reported `reached` by both the stack and this node.
+* Mapping works, and needs motion: standing at the `rooms` spawn the map holds 1 414 free cells and 2
+  walls, and after 20 s of driving the same map holds 18 022 free cells and 767 — the same robot, hall and
+  parameters. A mapper that has not been given a reason to integrate a scan is not broken, it is waiting.
+* Getting the stack to come up at all needed four things that are now in `config/nav2_rooms.yaml` with the
+  measurement that found each: the two costmaps are sections of their own rather than parts of the server
+  that reads them; `collision_monitor` and `docking_server` have to be configured, because nav2's lifecycle
+  manager has both in a fixed node list and one node that cannot configure aborts the whole bringup; the
+  planner's section is named `GridBased` because that is the id the shipped behaviour tree asks for; and
+  `spin` is one of the behaviour plugins because the tree builds an action client for it at activation.
 
-* The goals are as correct as the map. With a mapper that has no scan matching — the stand-in here paints
-  beams onto odometry — 15 of 17 goals sat inside a *real* wall of the hall by up to 25 cm, because that is
-  how far its walls sat from the hall's. Everything that reads the map inherits its error.
-* One mapper per graph. With two of them publishing `/map` by accident, 9 of the next 10 goals pointed at
-  cells that the map they were checked against called unknown. Nothing in ROS warns you about this.
+Not working yet, measured today:
+
+* In the spawn pocket the controller accepts a goal and then publishes **nothing** — 18 s of listening on
+  `/cmd_vel_nav`, `/cmd_vel_smoothed` and `/muster/cmd_vel` while a goal was active: no message on any of
+  them — and after 30 s answers `Failed to make progress`. The simulator side is not the problem: the same
+  robot driven by hand over the same topic moved 1.19 m in 6 s. So the remaining defect is in
+  `config/nav2_rooms.yaml`, in what the controller or collision monitor does with a goal inside a map whose
+  every free cell is within half a metre of a wall. Exploration as a whole therefore does not take off from
+  the `rooms` spawn yet; the frontier rules themselves are tested and the loop closes once the robot moves.
+* The `hall` frame (`tf.tree: slam`) is not in `mecanum_lab/types.py` defaults nor in that repo's CONTRACT
+  yet — `mecanum_lab/tf_bcast.py` carries the default.
