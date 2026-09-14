@@ -19,5 +19,13 @@ setup(
         # install it and `rviz:=true` would then look for it under `config/` and find nothing.
         (os.path.join("share", "ohm_frontier", "rviz"), glob("config/*.rviz")),
     ],
-    entry_points={"console_scripts": ["frontier_node = ohm_frontier.frontier_node:main"]},
+    # The three reactive demos are executables of this same package: each launch file names one in
+    # `executable=`, and a name that is not installed here is a launch-time error no import catches — which
+    # is why test_reactive.py compares the launch files against this list.
+    entry_points={"console_scripts": [
+        "frontier_node = ohm_frontier.frontier_node:main",
+        "wall_following = ohm_frontier.wall_following:main",
+        "obstacle_avoidance = ohm_frontier.obstacle_avoidance:main",
+        "turn_and_move = ohm_frontier.turn_and_move:main",
+    ]},
 )
