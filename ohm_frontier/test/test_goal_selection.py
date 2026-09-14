@@ -332,10 +332,19 @@ def test_the_weight_of_distance_can_be_turned_while_the_robot_is_driving(node):
     wide_first = node.goal
     assert wide_first.y > 3.0, f"with size and distance both at one the wide opening should win: {wide_first}"
     node.set_parameters([Parameter("weight_size", value=0.0), Parameter("weight_orientation", value=0.0)])
+
+    # The knob moves the ranking, and it does not steal the drive in progress: `reselect_margin` is the price
+    # of changing one's mind, and a slider moved from a lecture chair is not a reason to drop a drive that is
+    # working. Written as "the node must switch at once", this test asked for the flip-flop back.
+    ranked = node.candidates()
+    assert ranked[0].y < 3.0, f"distance alone should rank the near opening first: {ranked}"
+    node.on_timer()
+    assert node.goal == wide_first, f"a knob moved mid-drive dropped a working goal: {node.goal}"
+
+    node.goal = None                        # the way a drive ends when the place is reached
     node.on_timer()
     assert node.goal is not None and node.goal.y < 3.0, \
-        f"distance alone should pick the near opening, the node still has {node.goal}"
-    assert any(abs(x - wide_first.x) < 0.1 and abs(y - wide_first.y) < 0.1 for x, y in node.avoid) or True
+        f"the next goal should be chosen with the weights as they are now: {node.goal}"
 
 
 def test_a_weight_that_would_reward_a_far_frontier_is_refused(node):
@@ -393,9 +402,17 @@ def test_the_selected_marker_disappears_when_there_is_no_goal(node):
     deleted rather than left standing."""
     clock = start(node)
     sent = published_markers(node, ticks=2, clock=clock)
-    assert len(sent) == 2, "the picture is only sent once, while a goal exists"
-    by_namespace = {marker.ns: marker for marker in sent[1].markers}
+    assert len(sent) == 2, "the picture goes out every tick, not only when something changed"
+    alive = {marker.ns: marker for marker in sent[-1].markers}[SELECTED_NAMESPACE]
+    assert len(alive.points) == 1, f"while a goal is being driven to, the dot is drawn: {alive}"
+
     node.goal = None
-    published_markers(node, clock=clock)
-    gone = {marker.ns: marker for marker in sent[-1].markers}[SELECTED_NAMESPACE]
-    assert not gone.points and gone.action == gone.DELETEALL, by_namespace[SELECTED_NAMESPACE]
+    # Not reachable through `on_timer`, and that is the behaviour the owner asked for rather than a hole: a
+    # goal dropped with openings left on the map is replaced in the same tick. The state a display has to
+    # survive is the one where there is nothing left to take — every place reached or written off — so the
+    # picture for it is drawn directly, which is the same call `on_timer` would make.
+    standing = []
+    node.marker_pub.publish = standing.append
+    node.publish_markers([])
+    gone = {marker.ns: marker for marker in standing[-1].markers}[SELECTED_NAMESPACE]
+    assert not gone.points and gone.action == gone.DELETEALL, gone
