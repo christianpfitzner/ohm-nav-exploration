@@ -16,7 +16,8 @@ Why this file commands `vy` as well as `vx`: the base is mecanum, so the sum of 
 directly instead of being projected onto the driving direction, and a heading to the side is a direction
 the robot can actually take. On the steering car of the same simulator this would be a bug — the
 simulator answers „steering robot cannot strafe, vy=0.25 dropped" and keeps driving straight
-(`mecanum_lab/physics.py`) — which is the comparison worth making in the lecture.
+(`mecanum_lab/steering.py`, `SteeringChassis.set_twist`) — which is the comparison worth making in the
+lecture.
 
 What a lidar is not told is the other half of the honest picture: a table whose top is 30 cm above the
 floor reflects its beams over its own edge, so this field has an opinion about the floor and none about
