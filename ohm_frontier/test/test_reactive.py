@@ -11,7 +11,7 @@ here as a list of 360 numbers, the way `sensors.py` builds one, and the answer i
 The three tests at the end are about the split itself: the modules must still import when ROS is not there,
 because that is what makes the functions above testable at all, and `main` is what has to complain instead.
 """
-from math import inf, isclose, nan, pi, radians
+from math import inf, nan, pi, radians
 from pathlib import Path
 import re
 import sys

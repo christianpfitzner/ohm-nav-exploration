@@ -231,7 +231,7 @@ class FrontierNode(Node):
             seen = self.frames.lookup_transform(self.map_frame, f"{self.robot}/odom", Time())
         except Exception:                             # not up yet, expired, or a tree without that edge
             if not self.said_frames:
-                self.get_logger().warn(f"no transform {self.map_frame} → {self.robot}/odom on /tf — using "
+                self.get_logger().warning(f"no transform {self.map_frame} → {self.robot}/odom on /tf — using "
                                        "the odometry as if it were the map frame")
                 self.said_frames = True
             return self.pose
@@ -365,7 +365,7 @@ class FrontierNode(Node):
             return
         stalled = self.now() - self.progress_since
         if stalled > timeout:
-            self.get_logger().warn(f"({self.goal.x:.2f}, {self.goal.y:.2f}) given up on — no nearer in "
+            self.get_logger().warning(f"({self.goal.x:.2f}, {self.goal.y:.2f}) given up on — no nearer in "
                                    f"{stalled:.0f} s (nearest approach {self.closest:.2f} m, still "
                                    f"{gap:.2f} m away)")
             self.avoid.append((self.goal.x, self.goal.y))
@@ -399,7 +399,7 @@ class FrontierNode(Node):
         if self.navigate is None:
             return
         if not self.navigate.server_is_ready():
-            self.get_logger().warn(f"no {self.get_parameter('action_topic').value} server — the navigation"
+            self.get_logger().warning(f"no {self.get_parameter('action_topic').value} server — the navigation"
                                    " stack is not up, so nothing will drive to this")
             return
         goal = NavigateToPose.Goal()
@@ -455,7 +455,7 @@ class FrontierNode(Node):
             return
         handle = future.result()
         if not handle.accepted:
-            self.get_logger().warn("the navigation stack refused this goal outright")
+            self.get_logger().warning("the navigation stack refused this goal outright")
             self.give_up(attempt)
             return
         self.goal_handle = handle

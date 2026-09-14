@@ -204,14 +204,14 @@ class TurnAndMove(Node):
     def on_command(self, msg: String):
         what, amount = parse_command(msg.data)
         if what is None:
-            self.get_logger().warn(amount)                    # `amount` carries the reason
+            self.get_logger().warning(amount)                    # `amount` carries the reason
             return
         if what == "stop":
             self.mode, self.goal, self.error_sum = IDLE, None, 0.0
             self.get_logger().info(f"{IDLE} — commanded")
             return
         if self.pose is None:
-            self.get_logger().warn(f"'{msg.data}' has to wait: no odometry on /{self.robot}/odom yet, "
+            self.get_logger().warning(f"'{msg.data}' has to wait: no odometry on /{self.robot}/odom yet, "
                                    "and every controller here compares itself with it")
             return
         if what == "turn":
@@ -229,7 +229,7 @@ class TurnAndMove(Node):
         self.goal = (msg.pose.position.x, msg.pose.position.y)
         self.error_sum, self.mode = 0.0, GOING
         if msg.header.frame_id and not self.said_frames:
-            self.get_logger().warn(f"goal arrives in frame '{msg.header.frame_id}' and this node has no tf "
+            self.get_logger().warning(f"goal arrives in frame '{msg.header.frame_id}' and this node has no tf "
                                    "— taking its numbers as odometry coordinates. See the module docstring.")
             self.said_frames = True
         self.get_logger().info(f"{GOING}: ({self.goal[0]:.2f}, {self.goal[1]:.2f})")
