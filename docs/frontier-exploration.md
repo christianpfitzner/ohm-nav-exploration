@@ -81,25 +81,50 @@ Two more rules protect the goal itself:
 * The heading is pointed **away from the robot**, along the line from robot to goal. A goal approached
   backwards means the first new scan looks at where you came from instead of into the unknown.
 
-## Which frontier first: cells per metre
+## Which frontier first: three weights, one score
 
-With several frontiers, rank them by **clump size divided by distance**
-([`frontiers`](../ohm_frontier/ohm_frontier/frontiers.py)): what you get (unexplored boundary, which is
-what you will actually see next) per what you pay (metres of driving). A mapped room with a 1.0 m opening
-far away and a small crack nearby, robot at (1.0, 1.0), measured with the code:
+With several frontiers there has to be a ranking, and this one is a weighted sum of three quantities
+([`Grid.frontiers`](../ohm_frontier/ohm_frontier/frontiers.py)) — **size**, **orientation**, **nearness** —
+each divided by a threshold of the caller's own first, because cells, a wall ratio and metres do not add:
 
-| clump | cells | distance | score = cells / metres |
-| --- | --- | --- | --- |
-| the wide opening at y = 3.5 … 5.0 | 3 | 4.60 m | **0.65** |
-| the crack at y = 1.0 … 2.0 | 2 | 3.34 m | 0.60 |
+| the term | what it is divided by | so one unit of that weight means |
+| --- | --- | --- |
+| `weight_size` × cells in the clump | `min_frontier_cells` | "a clump just worth driving to" |
+| `weight_orientation` × how open and how far ahead the goal is | nothing — it is already 0 … 1 | "entering nose-first, with no wall around the goal" |
+| `weight_distance` × `min_goal_distance` / distance | nothing — it is a ratio | "a goal as close as one is allowed to be" |
 
-The wide opening wins although it is 1.3 m further on — which is the behaviour you want, and which a
-"nearest frontier first" rule gets exactly backwards: the nearest frontier is nearly always a crack in the
-wall the robot has already touched.
+Dividing first is not decoration. A score normalised against "the best candidate this call happened to find"
+would not mean the same thing on two maps or on two ticks, and `keep_or_switch` has to judge a candidate found
+now against a goal taken a minute ago.
 
-Size and distance are the two terms every implementation has. Orientation — how well the opening faces the
-robot's heading — is the third one a lecture can add, and it belongs in the score and nowhere else: the
-frontier rule, the aim and the blacklist should not have to know that a weight changed.
+Measured on the map the tests draw (`two_doorways`: a half-mapped room, a 3-cell opening far away, a 2-cell
+crack near, the robot at (0.5, 1.5); `min_cells=2` because the drawn openings are small — a real doorway is 20
+cells and the shipped floor is 12):
+
+| clump | cells | distance | score, the shipped weights | score, orientation off | score, robot turned round |
+| --- | --- | --- | --- | --- | --- |
+| the wide opening | 3 | 4.65 m | **1.82** | **1.60** | **1.72** |
+| the crack | 2 | 3.76 m | 1.35 | 1.12 | 1.22 |
+
+The wide opening wins although it is 0.9 m further on, which is the behaviour you want and the one a "nearest
+frontier first" rule gets exactly backwards: the nearest frontier is nearly always a crack in a wall the robot
+has already touched. `cells / metres`, the ranking this repo shipped first, is the middle column with both
+weights stuck at one — it is still reachable, as the case `weight_orientation = 0`.
+
+The last column is the orientation term working: the same map, the same clumps, the robot turned to look over
+its own shoulder, and the numbers change although nothing on the map did. That is the third term's whole job —
+entering a doorway nose-first means the first new scan looks into the unknown instead of at the room you have
+already mapped — and its default of 0.25 is deliberately small: nothing measured here says facing outweighs a
+room, and a default that silently prefers the frontier straight ahead leaves a robot circling one doorway.
+
+All three are declared parameters with a description and a range of 0 … 10. `ros2 param describe
+/frontier_node weight_distance` shows what a node declares; `ros2 param set /frontier_node weight_orientation
+0` takes effect on the next decision, without a restart, because the node answers parameter changes
+(`weights_changed`). A declared bounded double is also what a tuning panel turns into a slider —
+`rqt_reconfigure` is not installed on this machine, so nobody has checked that it lists a plain rclpy node
+here, and nothing in this package depends on it: the two commands above and a parameter file do the same job.
+The ranges are guards as well: a weight
+that rewarded a frontier for being far away is not a ranking, and rclpy refuses the negative number.
 
 ## When the goal cannot be reached, which it often can't
 
@@ -114,11 +139,43 @@ node that does not handle this asks for the impossible forever. Four things are 
 * **A blacklist, with radius.** A goal that arrived nowhere, or was written off, puts its position on
   `avoid` and `avoid_radius` (0.75 m) takes the surroundings with it — otherwise the next clump is chosen
   two cells along the same blocked doorway and the robot does the same trip again.
-* **A stall check.** A goal whose nearest approach stops improving (`stall_distance` within `stall_s`) and
-  a goal that has simply taken too long (`patience_s`) are both given up on.
+* **A clock that runs on progress, not on the calendar.** A goal is written off once the robot has not come
+  `progress_distance` (0.25 m) nearer to it within `goal_timeout_s` (10 s). Ten seconds of standing still is
+  the measured failure at the spawn pocket — the controller took the goal and published nothing on any
+  `cmd_vel` topic for 18 s — and ten seconds without approaching is also what a frontier on the far side of a
+  wall looks like from here. It is deliberately not a deadline for the whole drive: a frontier at the end of a
+  hall is perfectly reachable and takes far longer, and what restarts the clock is any approach of
+  `progress_distance` past the nearest gap so far. The version before this one had `stall_s` (25 s) and
+  `patience_s` (120 s), two calendar deadlines, which between them amounted to blacklisting a whole hall
+  inside two minutes; both parameters are gone.
 * **The stack's own verdict is read.** `NavigateToPose` reports `aborted` or `canceled`, and the code reads
   the number out of the status message — comparing a `GoalStatus` **message** to an integer is true for
   every goal including an arrived one, which would blacklist every place the robot ever reached.
+
+## Committing to a goal, which is a different bug from choosing badly
+
+Choosing the right frontier is half of it. The other half is *keeping* the choice, and the first version of
+this node got it wrong in a way that is invisible on a static map and obvious on a live one: the goal was
+chosen in the same timer tick that looked at the map, so **the timer period was the re-decision period**. At
+`period = 0.5 s`, with a map growing under the robot's own wheels, that handed over a new winner several times
+a minute — the robot drove a metre towards one doorway, then a metre towards the next, and arrived at neither.
+The symptom on a live run was a frontier that flipped every second and a robot that never reached one.
+
+What is in [`frontier_node.py`](../ohm_frontier/ohm_frontier/frontier_node.py) now:
+
+* **A goal stands until it ends**: reached, or no nearer for `goal_timeout_s`, or refused by the stack. See
+  `watch_the_current_goal`.
+* **Changing your mind has a price.** A fresh candidate takes over only by beating the score the live goal was
+  *taken on* — not the best the map offers now — by `reselect_margin` (1.5). A margin of 1.0 would bring the
+  bug straight back, so the code reads the parameter as at least 1.0 rather than trusting whoever set it.
+* **The same doorway seen again is not news.** `frontiers` re-aims at a clump as the map grows, so a candidate
+  within one cell resolution of the live goal is the same place, not a rival (`keep_or_switch`).
+* **A dropped goal is cancelled, not forgotten.** `bt_navigator` serves one goal at a time; a node that only
+  forgets its goal leaves the stack driving to the place it forgot, and the stack's answer about that drive
+  arrives while a *different* goal is current. Every goal therefore carries an attempt number, a late word
+  about an older one is ignored, and `drop_goal` sends the cancel.
+* **A switch nobody failed at is not written off.** Only a reached, stalled or refused goal adds to `avoid`;
+  switching away from a frontier that was never tried leaves it on the table.
 
 ## When there is no frontier at all
 
@@ -135,28 +192,75 @@ When there is genuinely nothing left — no clump over `min_frontier_cells`, non
 beyond `walk_out_reach` — the node says so **once** and stops. Saying it twice a second for the rest of the
 run is what an "exploration finished" screen looks like when nobody has thought about the end of the run.
 
+## Every parameter the node declares
+
+Defaults as declared in [`frontier_node.py`](../ohm_frontier/ohm_frontier/frontier_node.py). The four that
+change behaviour most are also in the README.
+
+| parameter | default | what it is for |
+| --- | --- | --- |
+| `robot` | `muster` | the name the odom, scan and cmd_vel topics are prefixed with |
+| `map_topic`, `goal_topic`, `markers_topic`, `action_topic` | `/map`, `/frontier_goal`, `/frontiers`, `/navigate_to_pose` | the four interfaces, named rather than hardcoded, because a run with two robots needs them moved |
+| `period` | 0.5 s | how often the map is looked over — and, since a goal is kept, nothing else |
+| `min_frontier_cells` | 12 | a clump under this is a gap between two beams, not a room |
+| `min_goal_distance` | 0.7 m | a goal nearer than this is under the robot's own wheels |
+| `walk_out_reach` | 4.0 m | how far the filler goal may be while nothing on the map is a frontier yet |
+| `avoid_radius` | 0.75 m | how much of the map a written-off goal takes with it |
+| `reached_distance` | 0.35 m | when a goal counts as arrived |
+| `progress_distance` | 0.25 m | how much nearer than ever before counts as making progress, which resets the timeout |
+| `goal_timeout_s` | 10 s | how long without that progress before the place is written off |
+| `reselect_margin` | 1.5 (never below 1.0) | how much better a candidate must be to take over a live goal |
+| `weight_size`, `weight_orientation`, `weight_distance` | 1.0, 0.25, 1.0 — range 0 … 10 | the ranking, live: see *Which frontier first* above |
+
+## The simulator's two quirks
+
+Both are handled by [`explore.launch.py`](../ohm_frontier/launch/explore.launch.py), and both will cost an
+afternoon if they are not written down, because neither looks like a bug in this repo.
+
+**Who publishes the top edge of the tf tree.**
+
+```
+map  →  muster/odom  →  muster/base_link  →  muster/laser
+ slam         sim              sim                 sim
+```
+
+The simulator publishes `map → <robot>/odom` as well by default — a drifting odometry being the second parent
+is what its Kalman lab is built on — and two publishers on that one edge give `<robot>/odom` two parents, which
+is not a tree. nav2's costmap answers that with `frame does not exist` rather than with a map. So the launch
+file asks for `tf_tree:=slam` (`--set tf.tree=slam`, implemented in `mecanum_lab/tf_bcast.py`), after which the
+simulator calls the frame of its own hall coordinates `hall` instead of `map` — a mapper anchors `map` wherever
+its first scan found the robot, which is not the corner of the hall that GPS and truth positions are measured
+from. What plans and draws is the frame named in the map message, which this node reads out of the message
+instead of assuming any of this.
+
+**The lidar's missing echo.** The simulator reports a beam that did not come back as the laser's own range,
+8.0 m, which is what every laboratory there measures. slam_toolbox cannot use that: a reading at its
+`max_laser_range` is not "the space beyond is open" — it is the mapper being told the hall ends there. So the
+launch file also passes `lidar_no_echo:=inf` (`--set sensor.lidar.no_echo=inf`, `mecanum_lab/ros_bridge.py`),
+which is what `sensor_msgs/msg/LaserScan` documents and what the mapper expects.
+
 ## The algorithm in the paper
 
-Brian Yamauchi, *A Frontier-Based Approach for Autonomous Exploration*, Proc. IEEE International Symposium
-on Computational Intelligence in Robotics and Automation (CIRA'97), pp. 146–151, 1997 —
-<https://doi.org/10.1109/CIRA.1997.613851> (resolves to IEEE Xplore, checked from this checkout).
-
-The companion paper the idea is often cited under is Brian Yamauchi, *Frontier Mapping and Exploration as an
-Adaptive Process*, Proc. IEEE International Conference on Systems, Man and Cybernetics, San Diego, 1997. Its
-DOI and page numbers are deliberately **not** given here: neither Crossref nor OpenAlex resolved that paper
-from this machine, and a guessed identifier in a handout is worse than none. Track it down in the library,
-not in a chat window.
+Brian Yamauchi, *A Frontier-Based Approach for Autonomous Exploration*, Proc. 1997 IEEE International
+Symposium on Computational Intelligence in Robotics and Automation (CIRA'97), pp. 146–151,
+<https://doi.org/10.1109/CIRA.1997.613851>. Checked against Crossref, which carries that title, venue, page
+range and DOI, and the DOI resolves to IEEE Xplore document 613851 (paywalled). The same author's *Frontier
+Mapping and Exploration as an Adaptive Process* (SMC'97) is the companion the idea is often cited under; its
+DOI and page range are deliberately **not** given here, because neither Crossref nor OpenAlex returned that
+record from this machine, and a guessed identifier in a handout is worse than none. Track it down in the
+library, not in a chat window.
 
 | Yamauchi's step | where it lives here |
 | --- | --- |
 | build an occupancy grid from the sensors | not ours: slam_toolbox, configured in [`config/slam_toolbox.yaml`](../ohm_frontier/config/slam_toolbox.yaml); the node subscribes `/map` and publishes no map of its own |
 | find frontier cells: free next to unknown | `Grid._against_unknown` in [`frontiers.py`](../ohm_frontier/ohm_frontier/frontiers.py) |
 | group them, discard what is too small to be a doorway | `Grid._clumps` and `min_frontier_cells` |
-| choose the frontier to explore by some utility | `Grid.frontiers`, score = cells / metres, sorted best-first |
+| choose the frontier to explore by some utility | `Grid.frontiers`: `weight_size × cells/min_frontier_cells + weight_orientation × openness-and-facing + weight_distance × min_goal_distance/distance`, sorted best-first; `Grid._aim` picks the cell inside the clump and `Grid._orientation` the facing term |
 | navigate to it | `FrontierNode.publish` sends a `nav2_msgs/action/NavigateToPose` goal; `/goal_pose` is RViz's button and no nav2 node subscribes to it, which is the mistake the paper's "send it to the navigator" hides |
-| when a frontier is unreachable, drop it and pick another | `FrontierNode.give_up`, `avoid` / `avoid_radius`, `stall_s`, `patience_s` |
-| stop when no frontiers remain | `seek_goal`'s empty case, said once (`said_empty`) |
-| — nothing in the paper covers this | `Grid.walk_out`: the first minute, when the map is smaller than `min_goal_distance`, has no frontier to pick at all |
+| when a frontier is unreachable, drop it and pick another | `FrontierNode.give_up` (three refusals, because one refusal while `bt_navigator` activates means nothing), `watch_the_current_goal` (`progress_distance` within `goal_timeout_s`), `avoid` with `avoid_radius`, and `drop_goal`, which cancels at the stack instead of only forgetting |
+| keep the plan instead of recomputing it every tick | — the paper does not cover it, and this repo only learned it by watching a robot fail to arrive: `keep_or_switch` and `reselect_margin`, see *Committing to a goal* |
+| stop when no frontiers remain | `FrontierNode.candidates`' empty case, reported once (`said_empty`) rather than twice a second |
+| — nothing in the paper covers this either | `Grid.walk_out`: the first minute, when the map is smaller than `min_goal_distance`, has no frontier to pick at all |
 
 Two further readings, both checked:
 
