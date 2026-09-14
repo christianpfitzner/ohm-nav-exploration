@@ -16,11 +16,19 @@
 #                          `selected`, published by frontier_node)
 #   the goal it chose      `/frontier_goal`, the same pose the nav2 action got
 #
-# `Reliability Policy: Reliable` on the scan is not decoration: RViz defaults a LaserScan to best effort,
-# the simulator publishes standard QoS, and the two never find each other — the usual diagnosis for that
-# pair is "no data" with a window that looks otherwise healthy. The Map display is the other way round:
-# slam_toolbox latches `/map`, so a volatile subscriber that joins late sees nothing until the next map
-# update, which after a finished run is never.
+# Two QoS settings here are worth the lines they take, because both are the kind that shows up as an empty
+# window rather than as an error. `Reliability Policy: Reliable` on the scan: the simulator publishes
+# standard (reliable) QoS on every topic, `mecanum_lab/ros_bridge.py` says so in its own header, while a
+# LaserScan display in RViz 2 arrives asking for best effort — which does match a reliable publisher, since
+# only a *reliable* subscriber refuses a best-effort publisher, not the other way round. Asking for Reliable
+# is the setting that cannot miss, and it is what nav2's own view does for the maps. The Map display needs
+# `Durability Policy: Transient Local` for a different reason: slam_toolbox latches `/map`, so a volatile
+# subscriber that joins late sees nothing until the next map update — which, on a map of a finished run,
+# never comes, and "the map was there when I started RViz first" is the symptom of that.
+#
+# No `Unreliable:` or `Description:` keys, which an older RViz had: neither string exists in
+# `librviz_default_plugins.so` on this ROS release, RViz 2 writes reliability inside the topic as
+# `Reliability Policy`, and an unknown key in a display is ignored in silence rather than reported.
 Panels:
   - Class: rviz_common/Displays
     Help Height: 78
@@ -149,7 +157,6 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /<robot>/odom
-      Unreliable: false
       Value: true
     - Alpha: 1
       Class: rviz_default_plugins/Path
@@ -193,7 +200,6 @@ Visualization Manager:
     - Alpha: 1
       Class: rviz_default_plugins/Pose
       Color Transformer: FlatColor
-      Description: the one it drives to
       Enabled: true
       Head Length: 0.2
       Head Radius: 0.09
@@ -208,7 +214,6 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /frontier_goal
-      Unreliable: false
       Value: true
     - Class: rviz_default_plugins/TF
       Enabled: false
