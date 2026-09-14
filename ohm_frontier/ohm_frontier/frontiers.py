@@ -10,8 +10,11 @@ The idea, in the order it is used:
   nobody has entered yet.
 * **Aim at the opening, not at the clump** — see `_aim`. The middle of a clump that bends around a corner
   stands in that corner, and a goal inside a wall is refused by every planner.
-* **Rank by size per unit distance** — `cells / metres`, see `frontiers`: the wide opening down the hall
-  beats the crack beside the wheel, and no hall of a certain size is needed for that to hold.
+* **Rank by weighted preference** — see `frontiers` and `Weights`: how big the opening is, how much wall is
+  around the cell aimed at and how far it is, each in units of the caller's own thresholds so that the three
+  can be added at all. `cells / metres` was the same trade-off with the weights fixed at one and no way to
+  turn either; the weights are parameters now because which of the three wins is exactly what a lecture wants
+  to turn up and watch.
 * **Blacklist** — see `frontier_node`. A goal that was refused or never reached writes off its
   surroundings, so the next frontier gets its turn instead of being asked forever.
 
@@ -27,9 +30,23 @@ import numpy as np
 
 UNKNOWN, FREE, OCCUPIED = 0, 1, 2
 AIM_WINDOW = 3          # cells around a goal that are counted for wall proximity (0.15–0.3 m)
+WINDOW_CELLS = (2 * AIM_WINDOW) ** 2       # how many cells that window holds, so a count becomes a ratio
 NEIGHBOURS = [(dr, dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1) if (dr, dc) != (0, 0)]
 
 Frontier = namedtuple("Frontier", "x y heading cells distance score")
+
+#: What the ranking values, as the operator named them. Units differ — cells, a ratio, metres — so `frontiers`
+#: divides each by a threshold of the caller's own before adding: one unit of `weight_size` is a clump of
+#: `min_cells`, one unit of `weight_distance` is a goal at `min_distance`. That leaves the weights
+#: dimensionless and comparable, and — because the divisor is a parameter rather than what one particular
+#: call happened to find — it leaves a score meaning the same thing on two maps and on two days.
+Weights = namedtuple("Weights", "size orientation distance")
+
+#: Size and distance at one apiece is the trade-off the ranking always made. Orientation is in with a small
+#: weight rather than none: walking in nose-first is worth something — the first new scan looks into the
+#: unknown instead of at where the robot came from — but nothing measured here says it outweighs a room,
+#: and a default that silently prefers the frontier straight ahead can leave a robot circling one doorway.
+DEFAULT_WEIGHTS = Weights(size=1.0, orientation=0.25, distance=1.0)
 
 
 def to_frame(pose: tuple, transform) -> tuple:
@@ -121,8 +138,8 @@ class Grid:
             groups.append(clump)
         return groups
 
-    def _aim(self, clump, robot: tuple = None, min_distance: float = 0.0):
-        """Which cell of a clump to drive at: the one with the least wall around it.
+    def _aim(self, clump, robot: tuple = None, min_distance: float = 0.0, nearby=None):
+        """Which cell of a clump to drive at: the one with the least wall around it, and how much that is.
 
         `robot` and `min_distance` narrow the candidates first. A frontier that runs around the robot — the
         shape of the first minute of every mapping run, and with no wall mapped yet the rule below has
@@ -135,44 +152,83 @@ class Grid:
         which the perfectly good opening beside it is blacklisted as unreachable. The cell with the fewest
         occupied cells in its `AIM_WINDOW` neighbourhood is the middle of the opening, which is also where
         a robot should enter a room it has never seen. Ties go to the cell nearest the clump's centroid.
+
+        The count comes back with the cell because the ranking wants the same number: what says "aim here"
+        also says "this doorway is wide", and measuring it twice would be two answers to one question.
         """
-        # Padded with walls, not with open space: past the edge of a growing map nothing is validated, so
-        # a cell on that edge should not look like the widest option there is.
-        sums = np.pad(self.cells == OCCUPIED, AIM_WINDOW, constant_values=True).astype(int) \
-            .cumsum(0).cumsum(1)
-        total = np.zeros((sums.shape[0] + 1, sums.shape[1] + 1), dtype=int)
-        total[1:, 1:] = sums
-
-        def nearby(row, col):                 # integral image: the window sum in four lookups, no loop
-            span = 2 * AIM_WINDOW
-            return (total[row + span, col + span] - total[row, col + span]
-                    - total[row + span, col] + total[row, col])
-
+        nearby = nearby or self._wall_counter()
         reachable = [rc for rc in clump if self._gap(rc, robot) >= min_distance] if robot is not None \
             else clump
         candidates = reachable or clump                 # if all of it is underfoot, let it be rejected below
         middle = np.array(candidates).mean(axis=0)
-        return min(candidates, key=lambda rc: (nearby(*rc), abs(rc[0] - middle[0])
-                                               + abs(rc[1] - middle[1])))
+        aim = min(candidates, key=lambda rc: (nearby(*rc), abs(rc[0] - middle[0])
+                                              + abs(rc[1] - middle[1])))
+        return aim, nearby(*aim)
+
+    def _wall_counter(self):
+        """A function answering "how many wall cells surround this cell", in four lookups per question.
+
+        An integral image of the occupied cells, built once per `frontiers` call because every clump of that
+        call asks for the same numbers. Padded with walls, not with open space: past the edge of a growing
+        map nothing has been validated, so a cell on that edge must not look like the widest option there is.
+        """
+        sums = np.pad(self.cells == OCCUPIED, AIM_WINDOW, constant_values=True).astype(int) \
+            .cumsum(0).cumsum(1)
+        total = np.zeros((sums.shape[0] + 1, sums.shape[1] + 1), dtype=int)
+        total[1:, 1:] = sums
+        span = 2 * AIM_WINDOW
+
+        def nearby(row: int, col: int) -> int:            # the window sum, no loop over the window
+            return (total[row + span, col + span] - total[row, col + span]
+                    - total[row + span, col] + total[row, col])
+        return nearby
+
+    def _orientation(self, robot: tuple, x: float, y: float, walls: int) -> float:
+        """How much this frontier is worth driving at *now*, as 0 … 1: how little wall is around the cell
+        aimed at, and how far that cell lies in the direction the robot is already looking.
+
+        The two halves are the two ways a frontier is awkward. A goal in a narrow crack has to be approached
+        slowly and may need a spin to get out of it again; a goal behind the robot needs a turn before it
+        needs a planner, and a robot that has to turn first behaves differently in a spawn pocket than in the
+        middle of a hall — which is the difference the lecture is about.
+
+        A caller whose pose carries no heading gets the wall half alone. Guessing "straight ahead" for a
+        heading nobody gave would have the ranking invent a fact.
+        """
+        open_space = 1.0 - min(walls, WINDOW_CELLS) / WINDOW_CELLS
+        if robot is None or len(robot) < 3:
+            return open_space
+        straight_ahead = (1.0 + cos(atan2(y - robot[1], x - robot[0]) - robot[2])) / 2.0
+        return (open_space + straight_ahead) / 2.0
 
     def _gap(self, rc: tuple, robot: tuple) -> float:
         x, y = self.metres(rc[0], rc[1])
         return hypot(x - robot[0], y - robot[1])
 
     def frontiers(self, robot: tuple, min_cells: int = 12, min_distance: float = 0.45,
-                  avoid: list | None = None, avoid_radius: float = 0.75) -> list:
-        """Every clump worth driving to, best first.
+                  avoid: list | None = None, avoid_radius: float = 0.75,
+                  weights: Weights = DEFAULT_WEIGHTS) -> list:
+        """Every clump worth driving to, best first, ranked by `weights`.
 
         `min_cells` is what tells a crack between two beams from a room. `min_distance` keeps a goal from
         being under the robot, where a planner only makes it spin. `avoid` is the blacklist of points that
         did not work out, and `avoid_radius` says how much around each is written off with it.
+
+        The ranking has to divide before it adds: cells, a wall ratio and metres do not sum. Each quantity
+        goes by a threshold of the caller's own — `min_cells` for size, `min_distance` for nearness, so that
+        one unit of a weight is "a clump just worth driving to" and "a goal as close as one is allowed to
+        be" — which leaves three numbers the weights can trade off, keeps the ranking the same when the whole
+        hall is scaled, and keeps a score comparable with a score from an earlier map. That last part is what
+        `frontier_node.keep_or_switch` needs: it judges a candidate found now against a goal chosen on an
+        earlier tick, and a score normalised against "the best of this call" would not mean the same thing in
+        both. `cells / metres`, which stood here before, is this trade-off with both weights stuck at one.
         """
-        edge = self._against_unknown()
+        walls = self._wall_counter()
         found = []
-        for clump in self._clumps(edge):
+        for clump in self._clumps(self._against_unknown()):
             if len(clump) < min_cells:
                 continue                                        # a crack, not a room
-            row, col = self._aim(clump, robot, min_distance)
+            (row, col), around = self._aim(clump, robot, min_distance, walls)
             x, y = self.metres(row, col)
             distance = hypot(x - robot[0], y - robot[1])
             if distance < min_distance:
@@ -182,7 +238,9 @@ class Grid:
             # nose-first: a goal approached backwards means the first new scan looks where it came from
             found.append(Frontier(x=x, y=y, heading=atan2(y - robot[1], x - robot[0]),
                                   cells=len(clump), distance=distance,
-                                  score=len(clump) / max(distance, 0.1)))
+                                  score=weights.size * len(clump) / max(min_cells, 1)
+                                  + weights.orientation * self._orientation(robot, x, y, around)
+                                  + weights.distance * min_distance / distance))
         return sorted(found, key=lambda f: -f.score)
 
     def walk_out(self, robot: tuple, reach: float = 4.0, avoid: list | None = None,
@@ -213,5 +271,8 @@ class Grid:
                 continue
             return Frontier(x=float(x[n]), y=float(y[n]),
                             heading=atan2(y[n] - robot[1], x[n] - robot[0]),
-                            cells=0, distance=float(distance[n]), score=0.0)
+                            cells=0, distance=float(distance[n]),
+                            score=0.0)          # scoreless on purpose: a real frontier takes it over, see
+                                                # frontier_node.keep_or_switch — this place is a step to take,
+                                                # not a place worth driving across a hall for
         return None
