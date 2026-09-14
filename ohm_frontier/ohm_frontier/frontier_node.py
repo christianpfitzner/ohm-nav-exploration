@@ -144,7 +144,11 @@ class FrontierNode(Node):
         self.pose = None                      # (x, y, theta) in the odometry frame
         self.goal = None                      # the Frontier under way
         self.attempt = 0                      # which goal the stack is answering about, see the module header
-        self.handle = None                    # the nav2 goal handle of that attempt, to cancel it with
+        # The nav2 goal handle of that attempt, to cancel it with. Named `goal_handle` rather than `handle`
+        # because `handle` belongs to rclpy: `Node.handle` is a property whose setter raises
+        # `handle cannot be modified after node creation`, so a node that stores its own handle under that
+        # name dies in its own constructor — measured here, where the node could not be created at all.
+        self.goal_handle = None
         self.goal_since = 0.0
         self.closest = 1e9                    # nearest approach to it so far
         self.progress_since = 0.0             # when it was last `progress_distance` nearer than ever
@@ -237,8 +241,17 @@ class FrontierNode(Node):
 
     def weights(self) -> Weights:
         """The three weights, read as they are *now* — a value set while the robot drives is in the next
-        ranking without anything having to be updated here."""
-        return Weights(**{name: float(self.get_parameter(name).value) for name in WEIGHTS})
+        ranking without anything having to be updated here.
+
+        The parameters carry a `weight_` prefix and the fields of `Weights` do not: the prefix is there for
+        whoever opens the tuning panel, which lists a node's parameters by name among all the others, and is a
+        nuisance inside `frontiers.py`. Stripping it is the whole translation, and it is a line that has to be
+        read as a pair with `WEIGHTS` — a parameter named there without a matching field in `Weights` answers
+        with a `TypeError` from the first decision, which is why the test names the parameters rather than
+        building a `Weights` by hand.
+        """
+        return Weights(**{name.removeprefix("weight_"): float(self.get_parameter(name).value)
+                          for name in WEIGHTS})
 
     def candidates(self) -> list:
         """Everything worth driving to on this map, best first — including the filler goal when nothing is.
@@ -367,7 +380,7 @@ class FrontierNode(Node):
         attempt number goes up first, which makes that answer stale, and the cancel makes it unnecessary.
         """
         self.attempt += 1
-        handle, self.handle = self.handle, None
+        handle, self.goal_handle = self.goal_handle, None
         if handle is not None:
             handle.cancel_goal_async()
         self.goal = None
@@ -445,7 +458,7 @@ class FrontierNode(Node):
             self.get_logger().warn("the navigation stack refused this goal outright")
             self.give_up(attempt)
             return
-        self.handle = handle
+        self.goal_handle = handle
         handle.get_result_async().add_done_callback(lambda outcome: self.on_result(outcome, attempt))
 
     def on_result(self, future, attempt: int):
@@ -464,7 +477,7 @@ class FrontierNode(Node):
         why = getattr(outcome.result, "error_msg", "") or ""
         self.get_logger().info(f"the stack ended this goal: {STATUS.get(status, status)}"
                                + (f" — {why}" if why else ""))
-        self.handle = None
+        self.goal_handle = None
         if self.goal is not None and status != SUCCEEDED:
             self.give_up(attempt)
 
@@ -502,17 +515,35 @@ class FrontierNode(Node):
     # ------------------------------------------------------------------------------- the tuning panel
 
     def weights_changed(self, parameters) -> SetParametersResult:
-        """Say out loud what the ranking now values, so a slider has an answer.
+        """Refuse a set of weights that would leave nothing to rank by, and say out loud what the ranking now
+        values, so a slider has an answer.
 
-        Nothing is updated here: the weights are read on every decision, so a value set while the robot is
-        driving is in the next ranking on its own. This is the line that tells whoever is at the machine that
-        the move arrived — and a panel with no feedback is indistinguishable from a panel that is not wired
-        up, which is the thing to know when the ranking does not change.
+        Nothing is stored here: the weights are read on every decision, so a value set while the robot is
+        driving is in the next ranking on its own. What is done here is the one check that cannot be made by a
+        declared range, because it is not about one weight but about the three together.
+
+        With all three at zero every candidate scores 0.0, so `keep_or_switch` compares 0.0 against
+        `reselect_margin` times 0.0, finds the candidate not worse, and takes it — a new goal on every tick,
+        which is the failure the margin exists to prevent. A walk-out goal already has score 0.0 on purpose
+        (see `candidates`), and the rule that lets any real frontier take that filler over is the same rule
+        that would let every frontier take over every other one once nothing carries a weight. So the sum is
+        refused rather than trusted, and the reason goes back with the refusal for whoever is at the panel to
+        read.
         """
-        for parameter in parameters:
-            if parameter.name in WEIGHTS:
-                self.get_logger().info(f"{parameter.name} is now {parameter.value:g} — the next decision "
-                                       "will be ranked with it")
+        moved = {p.name: float(p.value) for p in parameters if p.name in WEIGHTS}
+        if not moved:
+            return SetParametersResult(successful=True)
+        # The callback runs before the values are applied, so the state to judge is the current one with these
+        # few values laid over it — a `ros2 param set` of one weight has to be judged against the two that
+        # stayed where they were, not against zero.
+        after = {name: moved.get(name, float(self.get_parameter(name).value)) for name in WEIGHTS}
+        if not any(after.values()):
+            return SetParametersResult(
+                successful=False,
+                reason="all three weights at zero leaves every candidate on the same score, and the node "
+                       "would choose a new goal every tick again — leave at least one of them above zero")
+        for name, value in moved.items():
+            self.get_logger().info(f"{name} is now {value:g} — the next decision will be ranked with it")
         return SetParametersResult(successful=True)
 
     def now(self) -> float:
