@@ -1,169 +1,153 @@
-"""One node: lidar in, map and navigation goal out.
+"""Pick where to explore next in a hall nobody has mapped, and tell the navigation stack about it.
 
-Reads the robot's lidar and odometry out of the simulator, keeps a `frontiers.Grid`, publishes that grid
-as `/map` — for nav2's global costmap and for rviz — and publishes the best frontier as a goal on
-`/goal_pose`. The navigation stack is not in here: it runs beside this node and is told where to drive.
+Listens:
+    /map                                      slam_toolbox's map: free, occupied and unknown cells
+    <robot>/odom                              where the robot thinks it is
+Says:
+    /goal_pose                                the frontier to drive to, and the heading to face there
 
-    ros2 run ohm_frontier frontier_node --ros-args -p robot:=muster
+Only deciding is in here. Mapping is slam_toolbox's job, driving is nav2's, so this node keeps no map of
+its own and publishes none: two mappers in one graph means two answers to "what does the hall look like",
+and the one RViz shows is never the one the planner used.
+
+The map is the interesting input, because a cell there has three states — free, occupied, **unknown** —
+and unknown is neither of the others. A frontier is free floor next to unknown floor: the next room. A
+rule of "free next to not-free" cannot tell unknown from a wall and stops finding rooms after the first
+room is mapped, which is the classic way this algorithm ends up doing nothing.
+
+Two things the node does that the textbook description leaves out, both because running it showed them:
+
+* **A goal is given up on.** A frontier is a direction, not a reachable pose, and nav2 is free to refuse
+  one. A goal whose robot never moves towards it, or which the robot never arrives at, writes off its
+  surroundings and the next frontier is asked. Without that the node asks one impossible place forever.
+* **Empty is said once.** With nothing left to map, the same message would otherwise arrive twice a
+  second.
 """
-import json
-import math
+from math import atan2, cos, hypot, sin
 
-import numpy as np
 import rclpy
-from geometry_msgs.msg import Pose, PoseStamped
-from nav_msgs.msg import MapMetaData, OccupancyGrid, Odometry
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
-from tf2_msgs.msg import TFMessage
 
-from .frontiers import FREE, UNKNOWN, Frontier, Grid
-
-try:                                        # nav2's goal message. Without nav2 installed the plain
-    from nav2_msgs.msg import GoalPoseStamped as Goal, PoseWithStatus      # geometry message is used
-except ImportError:
-    Goal, PoseWithStatus = PoseStamped, None
+from .frontiers import Grid
 
 
 class FrontierNode(Node):
-
     def __init__(self):
         super().__init__("frontier_node")
-        p = self.declare_parameter
-        p("robot", "muster")
-        p("resolution", 0.10)                   # metres per cell of the map built here
-        p("min_frontier_cells", 12)             # below this a clump is a crack between two beams
-        p("min_distance", 0.6)                  # do not aim at your own doorstep
-        p("avoid_radius", 0.9)                  # how far a failed goal keeps a clump out
-        p("replan_s", 0.5)                      # how often the map goes out and the next goal is weighed
-        p("goal_tol", 0.40)                     # this close counts as arrived
-        p("stall_s", 25.0)                      # this long without this much motion counts as refused
-        p("stall_distance", 0.25)
-        p("patience_s", 120.0)                  # never arriving counts as refused too
-        p("map_topic", "/map")
-        p("goal_topic", "/goal_pose")
+        for name, value in {
+            "robot": "muster",
+            "map_topic": "/map",
+            "goal_topic": "/goal_pose",
+            "period": 0.5,                    # how often the map is looked over
+            "min_frontier_cells": 12,         # below this a clump is a crack between two beams
+            "min_goal_distance": 0.45,
+            "avoid_radius": 0.75,             # written off around a goal that did not work out
+            "reached_distance": 0.35,
+            "stall_distance": 0.25,           # less approach than this in `stall_s` is not moving
+            "stall_s": 25.0,
+            "patience_s": 120.0,              # after this a goal is given up on
+        }.items():
+            self.declare_parameter(name, value)
 
-        robot = self.get_parameter("robot").value
-        self.grid = None                        # built once /sim/world says how big the hall is
-        self.pose = None
-        self.mount = (0.0, 0.0, 0.0)            # base_link -> laser, from /tf_static
-        self.goal = None                        # (frontier, second sent, pose when sent)
-        self.avoid = []                         # centres already reached or failed
+        self.robot = str(self.get_parameter("robot").value)
+        self.grid = None                      # slam_toolbox's map, as cells
+        self.map_frame = ""
+        self.pose = None                      # (x, y, theta) in the odometry frame
+        self.goal = None                      # the Frontier under way
+        self.goal_since = 0.0
+        self.closest = 1e9                    # nearest approach to it so far
+        self.avoid = []                       # centres reached or given up on
         self.said_empty = False
-        self.painted = False                    # an empty grid has no frontiers either, and saying so
 
-        self.map_pub = self.create_publisher(OccupancyGrid, self.get_parameter("map_topic").value, 1)
-        self.goal_pub = self.create_publisher(Goal, self.get_parameter("goal_topic").value, 1)
-        self.create_subscription(LaserScan, f"{robot}/scan", self.on_scan, 10)
-        self.create_subscription(Odometry, f"{robot}/odom", self.on_odom, 10)
-        self.create_subscription(TFMessage, "/tf_static", self.on_tf, 10)
-        self.create_subscription(String, "/sim/world", self.on_world, 10)
-        self.create_timer(float(self.get_parameter("replan_s").value), self.on_timer)
+        self.goal_pub = self.create_publisher(PoseStamped, self.get_parameter("goal_topic").value, 10)
+        self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self.on_map, 10)
+        self.create_subscription(Odometry, f"/{self.robot}/odom", self.on_odom, 10)
+        self.create_timer(float(self.get_parameter("period").value), self.on_timer)
 
-    # ---------------------------------------------------------------------------- in
-    def on_world(self, msg: String) -> None:
-        if self.grid is not None:
-            return
-        hall = json.loads(msg.data)
-        self.grid = Grid(hall["size"][0], hall["size"][1],
-                         float(self.get_parameter("resolution").value))
-        self.get_logger().info(f"mapping {hall['name']}: {hall['size'][0]} × {hall['size'][1]} m "
-                               f"at {self.grid.res} m per cell")
+    # ------------------------------------------------------------------------------- what comes in
 
-    def on_tf(self, msg: TFMessage) -> None:
-        for t in msg.transforms:
-            if t.child_frame_id.endswith("laser"):
-                x, y = t.transform.translation.x, t.transform.translation.y
-                q = t.transform.rotation
-                self.mount = (x, y, 2.0 * math.atan2(q.z, q.w))
+    def on_map(self, msg: OccupancyGrid):
+        self.grid = Grid.from_map(msg)
+        if not self.map_frame:
+            self.map_frame = msg.header.frame_id
+            self.get_logger().info(
+                f"map on frame {msg.header.frame_id}: {msg.info.width} × {msg.info.height} cells at "
+                f"{msg.info.resolution:g} m per cell, origin "
+                f"({msg.info.origin.position.x:.2f}, {msg.info.origin.position.y:.2f})")
 
-    def on_odom(self, msg: Odometry) -> None:
-        pos, q = msg.pose.pose.position, msg.pose.pose.orientation
-        self.pose = (pos.x, pos.y, 2.0 * math.atan2(q.z, q.w))
+    def on_odom(self, msg: Odometry):
+        q = msg.pose.pose.orientation
+        self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
+                     2.0 * atan2(q.z, q.w))            # yaw of a quaternion; the world is flat
 
-    def on_scan(self, msg: LaserScan) -> None:
+    # ------------------------------------------------------------------------------- what goes out
+
+    def on_timer(self):
         if self.grid is None or self.pose is None:
             return
-        cos, sin = math.cos(self.pose[2]), math.sin(self.pose[2])       # beams leave the laser, not
-        x = self.pose[0] + cos * self.mount[0] - sin * self.mount[1]    # the middle of the robot
-        y = self.pose[1] + sin * self.mount[0] + cos * self.mount[1]
-        angles = np.arange(len(msg.ranges), dtype=float) * msg.angle_increment + msg.angle_min
-        self.grid.scan((x, y, self.pose[2] + self.mount[2]), angles,
-                       np.asarray(msg.ranges, dtype=float), msg.range_max)
-        self.painted = True
-
-    # ---------------------------------------------------------------------------- out
-    def on_timer(self) -> None:
-        if self.grid is None:
-            return
-        self.publish_map()
-        if self.pose is not None and not self.busy():
+        if self.goal is not None:
+            self.watch_the_current_goal()
+        if self.goal is None:
             self.seek_goal()
 
-    def busy(self) -> bool:
-        """True while the goal already sent is worth waiting for; a refused one is put on the list."""
-        if self.goal is None:
-            return False
-        chosen, sent, when = self.goal
-        now = self.get_clock().now().nanoseconds * 1e-9
-        if math.dist(self.pose[:2], (chosen.x, chosen.y)) <= self.get_parameter("goal_tol").value:
-            self.get_logger().info(f"reached ({chosen.x:.2f}, {chosen.y:.2f})")
-        elif now - sent > self.get_parameter("patience_s").value:
-            self.get_logger().warn(f"({chosen.x:.2f}, {chosen.y:.2f}): never arrived")
-        elif now - sent > self.get_parameter("stall_s").value \
-                and math.dist(self.pose[:2], when[:2]) < self.get_parameter("stall_distance").value:
-            self.get_logger().warn(f"({chosen.x:.2f}, {chosen.y:.2f}): the robot never moved")
-        else:
-            return True
-        self.avoid.append((chosen.x, chosen.y))     # reached or impossible, both are behind us
-        self.goal = None
-        return False
+    def watch_the_current_goal(self):
+        x, y, _ = self.pose
+        gap = hypot(x - self.goal.x, y - self.goal.y)
+        self.closest = min(self.closest, gap)
+        age = self.now() - self.goal_since
+        if gap < float(self.get_parameter("reached_distance").value):
+            self.get_logger().info(f"reached ({self.goal.x:.2f}, {self.goal.y:.2f})")
+            self.goal = None
+            return
+        stalled = age > float(self.get_parameter("stall_s").value) \
+            and self.closest > gap - float(self.get_parameter("stall_distance").value)
+        if stalled or age > float(self.get_parameter("patience_s").value):
+            self.get_logger().warn(f"({self.goal.x:.2f}, {self.goal.y:.2f}) given up on after {age:.0f} s"
+                                   f" — nearest approach {self.closest:.2f} m")
+            self.avoid.append((self.goal.x, self.goal.y))
+            self.goal = None
 
-    def seek_goal(self) -> None:
-        best = self.grid.frontiers(robot=self.pose,
-                                   min_cells=int(self.get_parameter("min_frontier_cells").value),
-                                   min_distance=float(self.get_parameter("min_distance").value),
-                                   avoid=self.avoid,
-                                   avoid_radius=float(self.get_parameter("avoid_radius").value))
-        if not best:
-            if self.painted and not self.said_empty:
-                self.get_logger().info("no frontier left — mapped as far as this lidar can see")
+    def seek_goal(self):
+        candidates = self.grid.frontiers(
+            robot=self.pose,
+            min_cells=int(self.get_parameter("min_frontier_cells").value),
+            min_distance=float(self.get_parameter("min_goal_distance").value),
+            avoid=self.avoid, avoid_radius=float(self.get_parameter("avoid_radius").value))
+        if not candidates:
+            if not self.said_empty:
+                self.get_logger().info("no frontier on this map — everything around has been reached or "
+                                       "refused")
                 self.said_empty = True
             return
         self.said_empty = False
-        self.goal = (best[0], self.get_clock().now().nanoseconds * 1e-9, self.pose)
-        self.publish_goal(best[0])
+        best = candidates[0]
+        self.goal, self.goal_since, self.closest = best, self.now(), 1e9
+        self.publish(best)
+        self.get_logger().info(f"goal ({best.x:.2f}, {best.y:.2f}) — {best.cells} frontier cells, "
+                               f"{best.distance:.1f} m away")
 
-    def publish_goal(self, chosen: Frontier) -> None:
-        pose = PoseStamped()
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.header.frame_id = "map"                  # the grid is anchored at the hall's own origin
-        pose.pose.position.x, pose.pose.position.y = float(chosen.x), float(chosen.y)
-        yaw = math.atan2(chosen.y - self.pose[1], chosen.x - self.pose[0])     # face where it is going
-        pose.pose.orientation.z, pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
-        if PoseWithStatus is not None:                # what nav2's bt_navigator listens for
-            wrapped = Goal()
-            wrapped.pose.header, wrapped.pose.pose = pose.header, pose.pose
-            pose = wrapped
-        self.goal_pub.publish(pose)
-        self.get_logger().info(f"goal ({chosen.x:.2f}, {chosen.y:.2f}) — {chosen.cells} frontier cells")
-
-    def publish_map(self) -> None:
-        cells = self.grid.cells
-        msg = OccupancyGrid()
+    def publish(self, frontier):
+        msg = PoseStamped()
+        msg.header.frame_id = self.map_frame or "map"         # the map's own frame, never assumed
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "map"
-        msg.info = MapMetaData(resolution=self.grid.res, height=cells.shape[0], width=cells.shape[1],
-                               position=Pose())
-        msg.data = np.where(cells == UNKNOWN, -1, np.where(cells == FREE, 0, 100)).ravel().tolist()
-        self.map_pub.publish(msg)
+        msg.pose.position.x, msg.pose.position.y = float(frontier.x), float(frontier.y)
+        msg.pose.orientation.z = sin(frontier.heading / 2.0)  # nose-first: the first new scan then looks
+        msg.pose.orientation.w = cos(frontier.heading / 2.0)  # into the unknown instead of behind
+        self.goal_pub.publish(msg)
+
+    def now(self) -> float:
+        return self.get_clock().now().nanoseconds * 1e-9
 
 
 def main(args=None):
     rclpy.init(args=args)
+    node = FrontierNode()
     try:
-        rclpy.spin(FrontierNode())
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
