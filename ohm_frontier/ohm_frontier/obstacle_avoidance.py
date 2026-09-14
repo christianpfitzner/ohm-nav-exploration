@@ -91,8 +91,9 @@ def field(ranges, angle_increment, range_max, aim=0.0, repulsion_range=2.0,
       away from the thing in front of it;
     * the `/ r` makes it urgent. A wall at 2 m is information, a wall at 30 cm is an argument.
 
-    The speed is then braked by what the nose sees: full speed from twice `stop_gap` out, nothing at
-    `stop_gap`, so a corridor that closes is walked into slowly and then not at all.
+    The speed is then braked by what the nose sees — full speed from twice `stop_gap` out, nothing at
+    `stop_gap` — so a corridor that closes is walked into slowly and then not at all. The brake belongs to
+    the approach only, which is what `brake_toward` is for.
     """
     pull_x, pull_y = cos(aim), sin(aim)             # the wanted direction, in the robot's own frame
     for index, r in enumerate(ranges):
@@ -110,13 +111,25 @@ def field(ranges, angle_increment, range_max, aim=0.0, repulsion_range=2.0,
         return Decision(0.0, 0.0, 0.0, direction, STOPPED,
                         f"{ahead:.2f} m of wall straight ahead — this node stops at {stop_gap:.2f} m")
 
-    brake = 1.0 if ahead is None else min(1.0, max(0.0, (ahead - stop_gap) / stop_gap))
     off = wrap(direction - aim)                     # the turn goes the short way, whichever way aim points
+    drive = speed * brake_toward(direction, ahead, stop_gap)
     if abs(off) < 0.12:                             # the field agrees with the wish: nothing to report
-        return Decision(speed * brake * cos(direction), speed * brake * sin(direction), 0.0,
-                        direction, CLEAR, "")
-    return Decision(speed * brake * cos(direction), speed * brake * sin(direction),
+        return Decision(drive * cos(direction), drive * sin(direction), 0.0, direction, CLEAR, "")
+    return Decision(drive * cos(direction), drive * sin(direction),
                     max(-turn_limit, min(turn_limit, turn_gain * off)), direction, TURNING, "")
+
+
+def brake_toward(direction, ahead, stop_gap) -> float:
+    """What fraction of `speed` this cycle may use, which is a question about driving *towards* something.
+
+    Throttle the retreat with the same number and a nearer wall becomes a slower backing away: measured
+    before this was separated, a wall 1.5 m ahead sent the robot backwards at 0.35 m/s and the same wall at
+    0.85 m at 0.19 m/s, which is urgency turned upside down. `STOPPED` above is the answer to a corridor
+    that closes; this is the answer to "how hard may I drive the way the field chose".
+    """
+    if ahead is None or cos(direction) <= 0.0:      # nothing in the cone, or this cycle drives away from it
+        return 1.0
+    return min(1.0, max(0.0, (ahead - stop_gap) / stop_gap))
 
 
 class ObstacleAvoidance(Node):

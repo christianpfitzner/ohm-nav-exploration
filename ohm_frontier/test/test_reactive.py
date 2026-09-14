@@ -12,6 +12,7 @@ The three tests at the end are about the split itself: the modules must still im
 because that is what makes the functions above testable at all, and `main` is what has to complain instead.
 """
 from math import inf, isclose, nan, pi, radians
+from pathlib import Path
 import re
 import sys
 
@@ -46,6 +47,8 @@ def a_scan(walls=(), no_echo="inf"):
             ranges[(middle + offset) % BEAMS] = distance
     return ranges
 
+
+PACKAGE = Path(__file__).resolve().parents[1]      # where setup.py and launch/ are, whoever ran pytest from
 
 # ------------------------------------------------------------------------------- wall following
 
@@ -120,13 +123,18 @@ def test_a_wall_beyond_the_repulsion_range_gets_no_vote_at_all():
 
 
 def test_a_nearer_wall_ahead_means_a_smaller_forward_command():
-    """The braking term: full speed from twice `stop_gap` out, nothing at `stop_gap`.
+    """The braking term on its own: full speed from twice `stop_gap` out, nothing at `stop_gap`.
 
-    At 85 cm the sum of the beams actually points backwards, and a mecanum base can drive that — so the
-    comparison here is "less forward", not "reversing is wrong".
+    Measured with one wall only, this compared two different *directions* rather than two speeds — a wall
+    dead ahead votes in the field as well as in the brake, so 1.5 m and 0.85 m differ in which way the robot
+    is pointed and the assertion was measuring the field. Here the wall that steers sits to the right in
+    both halves, and the wall in the nose cone is outside `repulsion_range` in both, so the only thing left
+    to change between the two calls is how hard the approach may be driven.
     """
-    far = field(a_scan([(0, 1.50)]), INCREMENT, RANGE_MAX, aim=0.0)
-    near = field(a_scan([(0, 0.85)]), INCREMENT, RANGE_MAX, aim=0.0)
+    steer_by = (-60, 0.55)
+    far = field(a_scan([(0, 3.00), steer_by]), INCREMENT, RANGE_MAX, aim=0.0, repulsion_range=0.6)
+    near = field(a_scan([(0, 0.70), steer_by]), INCREMENT, RANGE_MAX, aim=0.0, repulsion_range=0.6)
+    assert far.direction == pytest.approx(near.direction, abs=1e-9), "the way chosen must not be what changed"
     assert far.forward > near.forward, "the same wall, nearer, must not ask for more speed"
 
 
@@ -179,7 +187,9 @@ def test_a_turn_is_proportional_and_capped_at_what_the_wheels_can_do():
     half_a_radian = turn_towards(0.0, 0.2, gain=1.8, tolerance=0.05)
     assert half_a_radian.running and half_a_radian.turn == pytest.approx(0.36)
     assert half_a_radian.forward == 0.0, "a turn is a turn, not a curve"
-    assert turn_towards(0.0, pi, gain=1.8, limit=1.2).turn == pytest.approx(1.2), \
+    # Which way round at exactly 180 degrees is not asserted and cannot be: `wrap` answers -pi there, and
+    # both ways are the same distance. What this test is about is the ceiling, and the ceiling is a magnitude.
+    assert abs(turn_towards(0.0, pi, gain=1.8, limit=1.2).turn) == pytest.approx(1.2), \
         "1.8 * pi rad/s is a command the wheels ignore; a limited one is the only one worth sending"
 
 
@@ -267,10 +277,10 @@ def test_the_maths_of_all_three_modules_imports_without_ros(monkeypatch):
 def test_every_executable_a_reactive_launch_file_starts_is_installed_by_setup_py():
     """`Node(package=..., executable=...)` is a string: a missing console_script is a launch-time error and
     the kind of typo that no import catches, so the two lists are compared here."""
-    installed = set(re.findall(r"([\w-]+)\s*=\s*ohm_frontier\.\w+:main", (pytest.helpers.root / "setup.py").read_text()))
+    installed = set(re.findall(r"([\w-]+)\s*=\s*ohm_frontier\.\w+:main", (PACKAGE / "setup.py").read_text()))
     assert {"frontier_node", "wall_following", "obstacle_avoidance", "turn_and_move"} <= installed, installed
 
     for name in ("reactive_wall_follow.launch.py", "reactive_avoid.launch.py",
                  "reactive_turn_and_move.launch.py"):
-        started = set(re.findall(r'executable="([\w-]+)"', (pytest.helpers.root / "launch" / name).read_text()))
+        started = set(re.findall(r'executable="([\w-]+)"', (PACKAGE / "launch" / name).read_text()))
         assert started and started <= installed, f"{name} starts {started - installed}"

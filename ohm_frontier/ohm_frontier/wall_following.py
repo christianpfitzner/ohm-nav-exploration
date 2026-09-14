@@ -53,8 +53,11 @@ def beam(ranges, angle_increment, angle, window=1):
         return None
     middle = round(angle / angle_increment) % count
     seen = [ranges[(middle + offset) % count] for offset in range(-abs(window), abs(window) + 1)]
-    echoed = [float(r) for r in seen if echoed(r)]
-    return min(echoed) if echoed else None
+    # Named differently from `echoed` on purpose: binding that name here makes it a local of this function,
+    # and the filter of the line below then reads it before it has a value. `test_reactive.py` found it by
+    # calling the rule with an ordinary scan — UnboundLocalError in the beam every wall is found with.
+    returned = [float(r) for r in seen if echoed(r)]
+    return min(returned) if returned else None
 
 
 def echoed(r) -> bool:
