@@ -138,9 +138,14 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("goal_topic", default_value="/frontier_goal",
                               description="where a place to drive to comes from; empty for typed commands only"),
-        DeclareLaunchArgument("goal", default_value="3.0 0.0",
+        DeclareLaunchArgument("goal", default_value="12.0,8.0",
                               description="a place to drive to, as `x y` or `x,y`, published once on "
-                                          "`<robot>/move_command` five seconds in; empty for none. The node takes its places from outside "
+                                          "`<robot>/move_command` five seconds in; empty for none. Middle of "
+                                          "the hall, deliberately: the first default was `3.0 0.0`, which is a "
+                                          "place 0.1 m from the simulator's own south wall, and a node with no "
+                                          "obstacle avoidance in it drove there and sat with its lidar at "
+                                          "0.16 m — 5841 readings inside 0.30 m — which read to anyone "
+                                          "watching as a robot wedging itself into a corner The node takes its places from outside "
                                           "— that is what the `arrived` line is evidence about — and a demo "
                                           "that needs a second terminal to type the first one is a demo that "
                                           "sits still for its own first five seconds"),

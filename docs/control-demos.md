@@ -58,7 +58,7 @@ brings the mecanum sum back for the comparison.
 
 ## Measuring a demo: path against net
 
-`tools/try_demo.sh <launch file> <robot> <domain id> [seconds] [world:=hall]` is the whole experiment in one
+`tools/try_demo.sh <launch file> <robot> <domain id> [seconds] [world:=rooms]` is the whole experiment in one
 command: it starts the stack headless, waits for the hall, samples the odometry, the `Twist` on
 `/<robot>/cmd_vel` and the lidar's distances in six bearings for N seconds, stops the process group, and
 prints what the node said while it was happening. Underneath it is `tools/measure_drive.py <robot> <seconds>
@@ -66,6 +66,17 @@ prints what the node said while it was happening. Underneath it is `tools/measur
  got from where it started, the nearest echo and how often anything came inside the clearance margin, and how
 often the commanded turn changed its mind. The numbers below are from this machine, headless, in the halls
 named.
+
+**One of those numbers is the path, and it had to be repaired before it could be believed.** Adding up the
+distance between consecutive odometry samples looks like the easiest measurement in the file, and on this
+simulator it is a measurement of the odometry: a robot standing still with its wheels commanded to *exactly zero*
+— max `|vx|` and `|wz|` over 30 s both 0.000 — reported positions inside a 10 mm box and accumulated **32.06 m of
+travel** in that half minute. `path_length` counts a step only once the position has moved 50 mm from the last one
+it believed, which is over the p99 of the redraw (40 mm) and small against what the docs then claim with the
+number; the tool prints the distance it discarded, so the size of the correction is on the screen rather than in a
+comment somewhere. `net`, `furthest`, the echoes and the turn flips were never sums of steps and needed no such
+repair — which is why the two tables below are compared on those, and why the `path` column of the first is not
+measured the way the second's is.
 
 ### Before, measured on the commit that started this round
 
@@ -84,22 +95,52 @@ to go round from a fresh scan every 50 ms, so two comparable walls flipped the a
 
 ### After
 
-Each row is one `try_demo.sh` run, quoted in the commit that made the change it measures.
+Each row is one `try_demo.sh` run. The `path` column is the repaired measurement (50 mm dead band); the
+figures quoted from earlier commits in the last column are raw step-sums, so compare the `net` numbers across
+the two tables and treat the two `path` columns as different instruments.
 
 | demo | hall | path | net | what the run showed |
 | --- | --- | --- | --- | --- |
-| `reactive_wall_follow.launch.py` | `rooms` | 24.01 m | **5.18 m** | acquired the wall, converged onto the gap, and held **0.50 ± 0.10 m for 6.9 s continuously at a mean gap of 0.535 m**; nearest echo 0.26 m, 78 readings inside 0.30 m |
-| `reactive_wall_follow.launch.py` | `maze` | 16.80 m | **6.39 m** | the worst 10 s of the whole run still moved 1.22 m; 31 `blocked ahead` refusals at the corners, and the *left* wall came to 0.17 m, which this rule cannot see because it follows the right one |
+| `reactive_wall_follow.launch.py` | `rooms` | 18.34 m | **5.68 m** | reached 8.78 m from the spawn; nearest echo 0.24 m and 71 of 36 066 readings inside 0.30 m; longest unbroken hold at **0.50 ± 0.10 m of 7.1 s**, 15.5 s of the run inside that band; 113 turn flips in 4 231 turning samples; the worst 10 s moved 0.23 m and it was the first 10 s, while it was still looking for a wall |
+| `reactive_wall_follow.launch.py` | `maze` | 15.57 m | **8.33 m** | 34.8 s of 70 s inside the set gap, in stretches up to **19.5 s**; and 1 050 readings inside 0.30 m with the nearest echo at 0.18 m, because a maze squeezes a robot that is following one wall — the `min_wall_gap` guard stops the wheels and turns the nose off it, which is the refusal, not a fix |
+| `reactive_avoid.launch.py` | `rooms` | 20.51 m | **4.35 m** | reached 4.51 m out; **nothing inside 0.30 m in 38 712 readings**, nearest echo 0.41 m; 5 turn flips in 1 698 turning samples; `steering around an obstacle — more than 1.3 m ahead of the nose, +0.96 rad (left) has inf m` |
+| `reactive_avoid.launch.py` | `rooms`, again | 21.14 m | **1.12 m** | the same build and the same hall: same clearance (0 readings inside 0.30 m of 38 508, nearest 0.42 m), same 0 % strafing, and three quarters of the run spent turning. Quoted because the difference between 4.35 m and 1.12 m is the honest spread of this rule, not a regression |
+| `reactive_avoid.launch.py` | `production` | — | **1.20 m** | the refusal, measured over 120 s: **118.99 s of it in `STOPPED`**, nearest echo 0.70 m. 0.63 m of free aisle against a 0.66 m body diagonal — the aisle is the answer |
+| `reactive_turn_and_move.launch.py` | `open` | 1.67 m | **arrived** | `arrived: the goal (4.00, 2.00) is 0.12 m from here, inside the 0.12 m tolerance this node was started with, at (3.96, 2.11, -68°)`, with 0 readings inside 0.30 m and 0 % strafing. Before, on the same hall: 28.04 m of path for **1.30 m of net** — a circle of 4.45 m radius |
+| `move_to_point.launch.py` | `open` | 6.90 m | **6.87 m** | path/net 1.0, which is a straight line: `arrived at (12.00, 8.00), 0.11 m from the place`, nothing nearer than 4.66 m, 0 % strafing. Before: 30.08 m of path for **3.11 m of net**, 90 % of the samples carrying a sideways command, and it stopped 1.31 m short *while printing `arrived`* |
 
 **What the wall follower had to be given, in the order it was discovered.** A far echo is not a reference
 (`max_wall_range`), so a wall 5 m off the right is a direction to drive at and the phase says
 `wall in sight, closing on it`. A gap error in metres times a gain is a heading in disguise, so it is now
 explicitly a heading — lean the nose at the gap you want over `aim_lead` metres — and the wall's own angle,
-measured from the two diagonal beams, is what closes that loop. Four 60-to-75-second runs went into the three
-parameters that made it drive rather than wheel; they are each in the parameter comment they cost, in
-[`wall_following.py`](../ohm_frontier/ohm_frontier/wall_following.py), and the short version is on
-[the verification page](verification.md).
+measured from the two diagonal beams, is what closes that loop. The lean then needed a ceiling (`max_lean`, 20°):
+at the 45° the first version allowed, the right-behind beam lies along the wall and stops telling the rule
+anything about its angle, and a controller with no reading of its own heading drives a 0.23 m circle. And the gap
+needed a floor (`min_wall_gap`, 0.30 m), because the robot is 0.46 m wide, its flank sits 0.23 m from the centre
+the gap is measured at, and a run without the floor scraped a corner with the wall at 0.25 m while the rule
+printed `following`. Four runs of 60 to 75 s went into the parameters that made it drive rather than wheel, and
+each one is documented against the run it cost, in
+[`wall_following.py`](../ohm_frontier/ohm_frontier/wall_following.py).
 
 `strafe:=true` on any of the three mecanum demos brings the sideways sum back for the comparison; every number
 above was measured without it, and `sideways command: 0.00 m/s at its most, 0 % of samples strafing` is
 printed by the harness so the claim is checkable rather than asserted.
+
+### What each of these still cannot do
+
+* **The wall follower holds a wall, not a hallway.** 15.5 s of its 70 s in `rooms` are inside the set gap, in
+  stretches up to 7.1 s; the rest is doorways and crossings where there is no wall at 0.50 m to hold, and the
+  nearer side changes 25 times a run. It also follows the wall on one side only: in `maze` the left wall came to
+  0.17 m and the rule has no term that could notice.
+* **Obstacle avoidance keeps its clearance better than it makes progress.** Nothing came inside 0.30 m in either
+  `rooms` run — 0 readings of 77 220 — but one run got 4.35 m out of the box and the next 1.12 m. It is a rule
+  about the next half second, and the next half second is often "turn".
+* **It will not fit `production`, and the refusal is the demo.** 0.63 m of free aisle against a 0.66 m body
+  diagonal: measured, 118.99 s of 120 in `STOPPED`, 1.20 m from where it started, nearest echo 0.70 m.
+* **Neither point controller has anything to do with obstacles.** `move_to_point` across `open` is 6.90 m of path
+  against 6.87 m of net — a straight line — and the first default goal in its launch file was a place 0.1 m from
+  the hall's own wall, which it drove to and then parked against with its lidar at 0.16 m. A pose controller that
+  argues with a wall is a different program, and this package has one: `obstacle_avoidance.py`.
+* **Nothing here has been driven in a corridor**, and `turn_and_move` integrates whatever the odometry tells it:
+  with `slip = 1.0` in the simulator's physics, `drive 3.0` into a wall ends after 3 m of *wheels* with the robot
+  still in the corner. That one is on purpose and is in the docstring.

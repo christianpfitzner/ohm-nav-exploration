@@ -89,7 +89,9 @@ One rule per file, no map and no planner, and each draws what it is deciding:
 | `ros2 launch ohm_frontier reactive_turn_and_move.launch.py` | turn and drive at once, with a slip check against the odometry |
 | `ros2 launch ohm_frontier move_to_point.launch.py` | turn FIRST, then drive dead straight, on a camera close enough to read |
 
-`move_to_point` takes its place from a typed line, which is the cheapest way to see a controller re-aim:
+`move_to_point` and `reactive_turn_and_move` take their place from outside, and their launch files publish one
+five seconds in (`goal:=3.0,2.0`, empty for none) so that the line above moves the robot. To drive it by hand
+instead — which is the cheapest way to watch a controller re-aim — type the place onto the same topic:
 
 ```bash
 ros2 topic pub --once /muster/move_command std_msgs/msg/String "data: 'go 12.0 10.0'"

@@ -35,9 +35,24 @@ All four have launch files and have been run headless. **[The control-demo page]
 the path-and-net metres for each one, before and after the round that fixed the two lidar demos** — the
 before numbers are worth reading, because both demos printed a healthy state line while going nowhere.
 
-`move_to_point` across the `open` hall on a typed goal: 0.37 rad off, one turn on the spot, then 0.30 m/s
-straight at it, re-aiming as the odometry slipped. The three overlays are on the wire: `/move_view` in the
-namespaces `aim`, `goal`, `command`, `numbers` in frame `<robot>/odom`, plus `/wall_view` and `/field_view`.
+`move_to_point` across the `open` hall on a goal published by its own launch file: **6.90 m of path against
+6.87 m of net**, which is a straight line, ending `arrived at (12.00, 8.00), 0.11 m from the place` with nothing
+nearer than 4.66 m and no sample carrying a sideways command. The three overlays are on the wire: `/move_view`
+in the namespaces `aim`, `goal`, `command`, `numbers` in frame `<robot>/odom`, plus `/wall_view` and
+`/field_view`.
+
+The two point controllers wait for a goal, so their launch files publish one (`goal:=`, empty to take it away);
+measured without a goal the node sits in an empty hall printing `waiting for a command` — 1.14 m of path and
+0.00 m of net in 45 s — which is a controller waiting rather than failing, and looks identical to a controller
+failing unless the run says so.
+
+**The `path` metre on this page is a repaired instrument, and both numbers in the sentence above are why.**
+Summing the distance between consecutive odometry samples measures the odometry, not the robot: one robot,
+parked, with its wheels commanded to exactly zero (`|vx|` and `|wz|` both 0.000 for 30 s) reported positions
+inside a 10 mm box and accumulated **32.06 m of travel** in that half minute. Decimating does not help — the
+same 30 s at 10 Hz reads 29.98 m, because the jitter is not high frequency, it is the position being redrawn
+thousands of times inside one centimetre. `path_length` now believes a position only once it has moved 50 mm
+from the last believed one, and prints what it discarded.
 
 ## The view
 
@@ -83,5 +98,9 @@ actually got its message types, which is the only way to notice that a file had 
 `Odometry` and been answered, by its own guard, with "no rclpy here. Source a ROS 2 installation" on a
 machine that had one.
 
-Measured with that: **122 passed**, in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the
-working directory.
+Measured with that: **136 passed**, in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the working
+directory. The count grew from 122 over this round in three places, each of which is a hole a bug got through:
+the reactive family rewritten around `ways`/`menu`/`opening`/`avoid` (24 tests), the launch files' behaviour
+when a demo needs a goal and a display, and `tools/measure_drive.py` itself — because a document whose numbers
+come from a measuring tool should be able to say the tool measures what it claims, and until this week nothing
+tested it.
