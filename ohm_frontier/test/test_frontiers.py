@@ -239,3 +239,26 @@ def test_a_walk_out_stops_at_its_reach_and_walks_around_the_written_off():
     assert far.distance > 7.0                                      # with room to walk, it walks
     again = grid.walk_out(robot, reach=8.0, avoid=[(far.x, far.y)], avoid_radius=1.0)
     assert hypot(again.x - far.x, again.y - far.y) >= 1.0           # the end of the corridor is written off
+
+
+def test_a_map_that_did_not_change_is_walked_once_and_a_map_that_did_is_walked_again():
+    """The node looks the map over twice a second while slam_toolbox republishes whether or not it grew.
+
+    `Grid._survey` keeps the clumps and the wall counts against `Grid.checksum` so that per-tick work is the
+    aiming and the ranking — 60 ms of the period on a big map is clump-walking, and on an unchanged map it
+    buys nothing. What makes the cache legitimate is this test: a map that changed must not be answered with
+    the clumps of the map it was, and a hand-painted one must invalidate as surely as a message does.
+    """
+    grid = two_doorways()
+    asked = [(f.x, f.y, f.cells) for f in grid.frontiers(robot=(0.5, 1.5, 0.0))]
+    assert grid._surveyed is not None, "the survey was not remembered, so every tick pays for the walk again"
+
+    walked = grid._surveyed[1]
+    assert [(f.x, f.y, f.cells) for f in grid.frontiers(robot=(0.5, 1.5, 0.0))] == asked, \
+        "the same map asked about twice answers differently"
+    assert grid._surveyed[1] is walked, "the survey was thrown away although nothing moved"
+
+    paint(grid, 4.0, 4.5, 3.5, 5.0, OCCUPIED)           # the wide opening becomes wall
+    after = grid.frontiers(robot=(0.5, 1.5, 0.0))
+    assert grid._surveyed[1] is not walked, "the clumps of the old map answered for the new one"
+    assert len(grid._surveyed[1]) < len(walked), f"the wall that closed left {grid._surveyed[1]} standing"

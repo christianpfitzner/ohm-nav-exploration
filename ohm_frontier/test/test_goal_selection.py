@@ -416,3 +416,22 @@ def test_the_selected_marker_disappears_when_there_is_no_goal(node):
     node.publish_markers([])
     gone = {marker.ns: marker for marker in standing[-1].markers}[SELECTED_NAMESPACE]
     assert not gone.points and gone.action == gone.DELETEALL, gone
+
+
+def test_a_map_that_grew_nothing_is_not_mistaken_for_a_new_map(node):
+    """slam_toolbox publishes `/map` on its own clock, and a map that did not change is not news.
+
+    `on_map` compares `Grid.checksum` and keeps the grid it has, which is how the survey cached on that grid
+    survives: the clumps of this map are still the clumps of this map. The other half of the test is the risk
+    the cache buys — a map that did grow must not be dropped as a duplicate, because a node that stops
+    looking at new floor stops exploring.
+    """
+    node.on_map(two_openings())
+    kept = node.grid
+    node.on_map(two_openings())
+    assert node.grid is kept, "an identical map replaced the grid, its cached survey included"
+
+    grown = two_openings()
+    grown.data[0] = FREE_CELLS                          # one cell of floor the map before did not have
+    node.on_map(grown)
+    assert node.grid is not kept, "a map that grew was treated as the map it was"

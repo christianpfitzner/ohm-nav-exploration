@@ -184,7 +184,13 @@ class FrontierNode(Node):
     # ------------------------------------------------------------------------------- what comes in
 
     def on_map(self, msg: OccupancyGrid):
-        self.grid = Grid.from_map(msg)
+        incoming = Grid.from_map(msg)
+        if self.grid is not None and incoming.checksum() == self.grid.checksum():
+            return              # slam_toolbox republishes a map that has not changed. Keeping the grid keeps
+                                # the survey of it: the clumps and the wall counts of a map that is the same
+                                # map are the same clumps, and re-walking them at 2 Hz costs 60 ms a period
+                                # for no information.
+        self.grid = incoming
         if not self.map_frame:
             self.map_frame = msg.header.frame_id
             self.get_logger().info(
