@@ -78,9 +78,17 @@ Motion = namedtuple("Motion", "phase forward turn heading_error remaining")
 
 ORIENTING, DRIVING, ARRIVED, NO_GOAL = "orienting", "driving", "arrived", "no goal yet"
 
-#: The view's namespaces: the place, the nose, the command, the arithmetic. RViz switches namespaces, so a
-#: lecturer can leave the numbers off and keep the geometry (`view_markers` on why one namespace per kind).
-GOAL_NAMESPACE, AIM_NAMESPACE, COMMAND_NAMESPACE, NUMBERS_NAMESPACE = "goal", "aim", "command", "numbers"
+#: The view's namespaces: the place, the nose, the cone the nose has to stay inside, the command, the
+#: arithmetic. RViz switches namespaces, so a lecturer can leave the numbers off and keep the geometry
+#: (`view_markers` on why one namespace per kind) — which is also why the cone is drawn rather than written out:
+#: two lines at ±`aim_tolerance` off the nose say what the number says, sit next to the goal line at the same
+#: time, and are big enough for a hall to read.
+GOAL_NAMESPACE, AIM_NAMESPACE, CONE_NAMESPACE = "goal", "aim", "cone"
+COMMAND_NAMESPACE, NUMBERS_NAMESPACE = "command", "numbers"
+
+#: metres of cone edge to draw, so the two lines reach past the width of a doorway and the comparison with the
+#: goal line is made where the robot is rather than where the goal is.
+CONE_REACH = 3.0
 
 #: metres of arrow per metre per second. 0.3 m/s is 30 cm of arrow at 1:1 and invisible from the back of a
 #: room at 1:10; drawn to a stated scale rather than to a flattering one, and the scale is in the label.
@@ -268,13 +276,18 @@ class MoveToPoint(Node):
             self.phase = decided.phase
 
     def draw(self, decided: Motion):
-        """The place, the nose, the command and the arithmetic — four namespaces, one message.
+        """The place, the nose, the cone, the command and the arithmetic — five namespaces, one message.
 
-        The aim line is the part of a sequential controller that cannot be seen any other way: goal line and
-        aim line coinciding is `driving`, a gap between them is `orienting`, and the width of the cone in which
-        they count as one line *is* `aim_tolerance`, the parameter this file exists to make visible. The arrow
-        is the command at `COMMAND_SCALE`, because what the wheels are told and what the robot does on one
-        screen is what a control lecture is actually about.
+        The aim line is the part of a sequential controller that cannot be seen any other way: goal line and aim
+        line coinciding is `driving`, a gap between them is `orienting`. And the cone the two have to stay inside
+        *is* `aim_tolerance`, the parameter this file exists to make visible, so it is drawn — which is not a
+        stylistic preference. The label used to name it, in words, with the tolerance, the speed and the turn
+        rate all in one line; in a screenshot of a real run that rendered as letters half a hall wide, with two
+        fragments of it visible at a time. What is written over the robot now is the phase and the two numbers
+        that decide it; the geometry carries the tolerance, and the log line still has the whole sentence.
+
+        The arrow is the command at `COMMAND_SCALE`, because what the wheels are told and what the robot does on
+        one screen is what a control lecture is actually about.
         """
         if self.view_pub is None or self.pose is None:
             return
@@ -283,6 +296,12 @@ class MoveToPoint(Node):
         x, y, heading = self.pose
         markers = [view.lines(frame, stamp, AIM_NAMESPACE,
                               [((x, y), (x + cos(heading), y + sin(heading)))], 0.02, view.GREEN)]
+        tolerance = self.settings["aim_tolerance"]
+        markers.append(view.lines(
+            frame, stamp, CONE_NAMESPACE,
+            [((x, y), (x + CONE_REACH * cos(heading + tolerance), y + CONE_REACH * sin(heading + tolerance))),
+             ((x, y), (x + CONE_REACH * cos(heading - tolerance), y + CONE_REACH * sin(heading - tolerance)))],
+            0.015, view.WHITE))
         if self.goal is not None:
             markers.append(view.lines(frame, stamp, GOAL_NAMESPACE, [((x, y), self.goal)], 0.03, view.BLUE))
         if decided.forward or decided.turn:
@@ -291,10 +310,8 @@ class MoveToPoint(Node):
                                        [((x, y), (x + reach * cos(heading), y + reach * sin(heading)))],
                                        colour=view.ORANGE))
         markers += view.labels(frame, stamp, NUMBERS_NAMESPACE,
-                               [((x, y), f"{decided.phase} · {decided.heading_error:+.2f} rad off a "
-                                         f"±{self.settings['aim_tolerance']:.2f} rad cone · "
-                                         f"{decided.remaining:.2f} m left · {decided.forward:.2f} m/s, "
-                                         f"{decided.turn:+.2f} rad/s")])
+                               [((x, y), f"{decided.phase} · {decided.heading_error:+.2f} rad · "
+                                         f"{decided.remaining:.2f} m")])
         view.publish(self.view_pub, markers)
 
 

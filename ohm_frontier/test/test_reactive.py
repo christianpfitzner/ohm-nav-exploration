@@ -303,6 +303,31 @@ def test_with_ros_present_the_guard_imports_every_message_name_it_uses():
     assert view_markers.available(), "the guards are fine but the overlay says it is not there anyway"
 
 
+def test_a_text_marker_is_placed_by_its_pose_and_a_list_marker_by_its_points_because_rviz_reads_two_places():
+    """The one asymmetry in `visualization_msgs/msg/Marker` that silently moves the whole overlay.
+
+    Every kind this package draws is a list marker — dots, arrows, lines — and reads `points`. Text is not: a
+    `TEXT_VIEW_FACING` marker is drawn at its `pose`, and a label whose `points` are set and whose `pose` is left
+    alone is a label at the origin of the frame, which for an odometry-frame overlay is where the robot was
+    booted and not where it is. Nothing complains: the topic carries the marker, the display lists the
+    namespace, and the screen has no sentence on it. Found by rendering the view and looking.
+    """
+    from builtin_interfaces.msg import Time
+
+    stamp = Time(sec=1000, nanosec=0)
+    label, = view_markers.labels("muster/odom", stamp, "numbers", [((3.0, 6.0), "arrived · 0.04 m left")])
+    assert label.type == label.TEXT_VIEW_FACING
+    assert label.text.startswith("arrived"), "the words are the point of the marker"
+    assert (label.pose.position.x, label.pose.position.y) == (3.0, 6.0), \
+        "a label over the robot, not at the origin of the frame it is drawn in"
+    assert label.scale.z > 0.1, "`scale.z` is the height of the text in metres; at 0 RViz draws nothing at all"
+
+    line = view_markers.lines("muster/odom", stamp, "goal", [((0.0, 0.0), (3.0, 6.0))])
+    assert len(line.points) == 2 and line.pose.position.x == 0.0, \
+        "and the geometry kinds are the other way round, which is exactly why one line of this is worth " \
+        "a test: the same field name means nothing across marker types"
+
+
 def test_every_executable_a_launch_file_starts_is_installed_and_every_one_installed_is_launched():
     """`Node(package=..., executable=...)` is a string: a missing console_script is a launch-time error and
     the kind of typo that no import catches, so the two lists are compared here.

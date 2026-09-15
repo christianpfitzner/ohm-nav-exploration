@@ -97,8 +97,9 @@ def labels(frame, stamp, namespace: str, notes, height: float = 0.30, colour=WHI
     `height` is the height of the text in metres, and 0.30 is not a taste: the view in `config/explore.rviz`
     orbits at 20 m because the hall it is opened on is 30 × 20 m, and text at the 0.11 m this defaulted to is a
     grey smear at that distance — measured in a screenshot of a real run, where the geometry was legible and the
-    arithmetic written over it was not. It is the height of the robot, which is also the size at which a lecture
-    hall reads it.
+    arithmetic written over it was not. It is about the height of the robot, which is the size a hall reads; it is
+    also the size at which a sentence will not fit on the screen, so what goes into `notes` is a phase and two
+    numbers, and the long form belongs in the node's log.
 
     Each carries a one-second lifetime, which is how a text overlay disappears when a node stops having things
     to say: the labels are the one kind of marker that would otherwise be left hanging over a hall that has
@@ -112,7 +113,10 @@ def labels(frame, stamp, namespace: str, notes, height: float = 0.30, colour=WHI
         marker.id, marker.text = index, text
         marker.scale.z = height
         marker.lifetime = Duration(sec=1) if Duration is not None else marker.lifetime
-        marker.points = [_at(where, LABEL_HEIGHT)]
+        # A text marker is placed by its `pose`, not by a point array — every other kind here is a list
+        # marker and reads `points`, which is why this one was writing its sentences at the origin of the
+        # frame, a hundred cells from the robot they describe, and no amount of zooming in RViz found them.
+        marker.pose.position = _at(where, LABEL_HEIGHT)
         out.append(marker)
     return out
 
@@ -142,6 +146,12 @@ def publish(view, markers) -> None:
     data in the transform cache'` — seen on the first run of this code, and it sends a student to the tf tree for
     a problem that fixes itself one cycle later. Dropping it costs nothing, because the next timer tick draws the
     same picture with a real time on it.
+
+    It is worth knowing that this catches the *epoch*, not the whole transient. A node on `use_sim_time` learns
+    the time from `/clock`, which arrives a beat after the simulator has been publishing transforms for a second,
+    so an overlay stamped 0.040 s can still be older than everything in the cache — the same RViz line, with a
+    stamp that is not zero. Nothing in a node can see the cache, so the honest statement is that the first second
+    of overlays may be dropped and that this is not a fault.
     """
     if view is None or MarkerArray is None:
         return
