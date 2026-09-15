@@ -43,10 +43,41 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
 CLEARANCE = 0.30        # m, a little over the robot's own 0.23 m radius: closer than this is a near miss
+PATH_HZ = 10.0          # Hz: how often a position counts as a step of the path. Not taste — the simulator's
+                        # odometry carries a few millimetres of noise into every update and `/odom` is bridged
+                        # at ~87 Hz, so summed sample-to-sample the noise *is* travel: this robot, parked and
+                        # showing 0.00 m/s, accumulated **6.49 m of "path" in 22 s**, and a run of 6.87 m
+                        # straight read 17.33 m. At 10 Hz the parked stretch reads 0.27 m and the straight run
+                        # 7.22 m, which is the same walk with the noise off it.
 
 #: the bearings the reactive family looks in, named as the demos name them
 BEARINGS = (("ahead", 0.0, 3), ("right", -math.pi / 2, 2), ("right_ahead", -math.pi / 4, 2),
             ("right_behind", -3 * math.pi / 4, 2), ("left", math.pi / 2, 2), ("behind", math.pi, 4))
+
+
+def split_path(points, t0, span, hz=PATH_HZ):
+    """(path over positions ~`hz` apart, metres of step-sum that decimation left out).
+
+    Two ways of adding up the same walk that differ by a factor of two on this robot, and the difference is
+    the sensor and not the driving — see `PATH_HZ`. Decimating by index alone is what the first version did
+    and it does not fix it: the bridge's rate drifts between 80 and 94 Hz across a run, so an index stride
+    lands wherever it lands. This picks the sample nearest each `1/hz` instant in *time*, which is the same
+    10 Hz walk whether the bridge is running fast or slow.
+    """
+    raw = sum(math.dist(points[i], points[i + 1]) for i in range(len(points) - 1))
+    if span <= 0 or len(points) < 3:
+        return raw, 0.0
+    every, sampled, taken = 1.0 / hz, [points[0]], [0]
+    want, n = every, len(points)
+    while want < span:
+        i = min(n - 1, int((want / span) * (n - 1)))       # the sample nearest this instant
+        if i != taken[-1]:
+            taken.append(i)
+            sampled.append(points[i])
+        want += every
+    decimated = sum(math.dist(sampled[i], sampled[i + 1]) for i in range(len(sampled) - 1))
+    return decimated, raw - decimated
+
 
 
 def yaw_of(odom) -> float:
@@ -111,11 +142,17 @@ def main(argv):
         return 1
 
     points = [(r[1], r[2]) for r in rows]
-    path = sum(math.dist(points[i], points[i + 1]) for i in range(len(points) - 1))
+    # Path is summed over samples ~10 Hz apart, not over every sample. The simulator's odometry carries a few
+    # millimetres of noise per update and the `/odom` bridge runs at 87 Hz, so summing every step adds the
+    # noise as though it were travel: measured on a run that drove 6.9 m dead straight to a point and then
+    # sat still, the every-sample sum reads **17.33 m** and the 10 Hz sum reads **8.64 m** against a true
+    # 6.9 m. Net displacement and reach are not sums of steps and are unaffected — which is why the two
+    # numbers are quoted together and the ratio is the one to be careful with.
+    span = rows[-1][0] - rows[0][0]
+    path, jitter = split_path(points, rows[0][0], span, PATH_HZ)
     net = math.dist(points[0], points[-1])
     # The worst 10 s window: a robot that is stuck somewhere is stuck for a stretch of the run, not at its
     # end, and a total over the whole run is how a stuck stretch hides inside a good one.
-    span = rows[-1][0] - rows[0][0]
     window = int(10 * (len(rows) - 1) / span) if span > 0 else 0     # samples in 10 s, averaged over the run
     worst = (None, 0.0)
     if window and len(rows) > window:
@@ -130,7 +167,9 @@ def main(argv):
     flips = sum(1 for a, b in zip(turning, turning[1:]) if a * b < 0)
     ratio = f"{path / net:.1f}" if net > 0.05 else "— it came back to itself"
     print(f"\n{len(rows)} samples over {seconds:.0f} s on /{robot}/odom")
-    print(f"  path {path:6.2f} m   net {net:6.2f} m   path/net {ratio}")
+    print(f"  path {path:6.2f} m   net {net:6.2f} m   path/net {ratio}"
+          f"   (heard at {len(rows) / span:.0f} Hz, summed at {PATH_HZ:.0f} Hz:"
+          f" {jitter:.2f} m of odom step-sum left out)")
     print(f"  furthest from the spawn: {reach:.2f} m")
     if echo:
         print(f"  nearest echo: {min(echo):.2f} m   inside {clearance:.2f} m in "
