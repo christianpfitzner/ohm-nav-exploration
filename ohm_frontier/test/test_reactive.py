@@ -11,7 +11,7 @@ here as a list of 360 numbers, the way `sensors.py` builds one, and the answer i
 The three tests at the end are about the split itself: the modules must still import when ROS is not there,
 because that is what makes the functions above testable at all, and `main` is what has to complain instead.
 """
-from math import atan, degrees, inf, nan, pi, radians
+from math import atan, cos, degrees, hypot, inf, nan, pi, radians, sin
 from pathlib import Path
 import re
 import sys
@@ -20,10 +20,13 @@ import pytest
 
 sys.path.insert(0, ".")
 from ohm_frontier import move_to_point, obstacle_avoidance, turn_and_move, view_markers, wall_following   # noqa: E402
-from ohm_frontier.obstacle_avoidance import CLEAR, STOPPED, TURNING, field, nearest_ahead, wrap  # noqa: E402
-from ohm_frontier.turn_and_move import drive_straight, drive_to, parse_command, turn_towards  # noqa: E402
-from ohm_frontier.wall_following import (APPROACHING, BLOCKED, DIAGONAL, FOLLOWING, NO_WALL, SEARCHING,
-                                         TOO_CLOSE, beam, side_of, state_line, steer)                            # noqa: E402
+from ohm_frontier.obstacle_avoidance import (BLOCKED as FIELD_BLOCKED, CLEAR, NOWHERE, TURNING,   # noqa: E402
+                                             avoid, floor_down, menu, planning_reach, runway,
+                                             way_round, ways, wrap)
+from ohm_frontier.turn_and_move import (arrive_words, drive_straight, drive_to, parse_command,   # noqa: E402
+                                        turn_towards)
+from ohm_frontier.wall_following import (APPROACHING, BLOCKED, DIAGONAL, FOLLOWING, NO_WALL,   # noqa: E402
+                                         SEARCHING, TOO_CLOSE, beam, side_of, state_line, steer)
 
 BEAMS, INCREMENT, RANGE_MAX = 360, 2 * pi / 360, 8.0        # what `sensors.py` actually publishes
 
@@ -284,53 +287,131 @@ def test_the_lidars_own_maximum_is_no_wall_once_a_range_is_named():
 # ------------------------------------------------------------------------------- the vector field
 
 
-def test_the_field_points_away_from_a_wall_and_towards_the_open_side():
-    """Both halves in one test, because a field that only ever turns one way is a sign error."""
-    wall_on_the_right = field(a_scan([(-60, 0.80)]), INCREMENT, RANGE_MAX)
-    assert wall_on_the_right.state == TURNING and wall_on_the_right.direction > 0
-    assert wall_on_the_right.turn > 0, "the open side is to the left, so the turn goes left"
+def test_the_rule_points_away_from_a_wall_and_towards_the_open_side():
+    """Both halves in one test, because a rule that only ever turns one way is a sign error — and this rule
+    has a tie to break, which is where a left/right bias would show up.
 
-    wall_on_the_left = field(a_scan([(60, 0.80)]), INCREMENT, RANGE_MAX)
-    assert wall_on_the_left.direction < 0, "the same wall mirrored must give the same answer mirrored"
+    A wall dead ahead at 0.9 m is a dead end rather than an obstacle: its 0.9 m of floor is what keeps the
+    nose off the menu, and a second wall on the right takes that side out too, so what is left to drive is
+    the opening on the left — 30° of it, which is where the ranking lands once the headings are ranked by how
+    wide their opening is rather than by how little turning they cost.
+    """
+    walled = [(0, 0.90), (-40, 0.80)]
+    to_the_left = avoid(a_scan(walled), INCREMENT, RANGE_MAX)
+    assert to_the_left.state == TURNING and 0.3 < to_the_left.direction < 0.7, to_the_left.why
+    assert to_the_left.turn > 0, "the open side is to the left, so the turn goes left"
+    assert to_the_left.why, "and it says which gap it picked"
+
+    mirrored = avoid(a_scan([(0, 0.90), (40, 0.80)]), INCREMENT, RANGE_MAX)
+    assert mirrored.direction == pytest.approx(-to_the_left.direction), \
+        "the same wall mirrored must give the same answer mirrored"
+    assert mirrored.turn < 0
 
 
-def test_a_wall_beyond_the_repulsion_range_gets_no_vote_at_all():
-    """The `- r` in `(repulsion_range - r) / r`. Without it the far half of a 360-beam scan outvotes the
-    near half and the robot steers away from the room instead of away from the thing in front of it."""
-    decided = field(a_scan([(90, 3.0)]), INCREMENT, RANGE_MAX, aim=0.0, repulsion_range=2.0)
-    assert decided.state == CLEAR and decided.turn == 0.0
-    assert decided.direction == pytest.approx(0.0, abs=1e-9), "a wall 3 m away may not bend the field"
+def test_an_echo_beyond_the_planning_reach_is_a_direction_and_not_a_brake():
+    """The other half of the far map, which is what the rewrite bought.
+
+    `planning_reach` is 1.26 m for the default clearance and brake lead, so a wall 6 m ahead cannot shorten
+    any heading's runway — it is not a thing to brake for. It is not nothing either: it is the floor down
+    that ray, and 6 m of floor is what puts the heading on the menu at all. A wall 3 m out used to be a vote
+    in the field; here it is a sentence about where the hall is.
+    """
+    assert planning_reach(0.40, 0.80) == pytest.approx(hypot(1.2, 0.4))
+    decided = avoid(a_scan([(0, 6.0)]), INCREMENT, RANGE_MAX)
+    assert decided.state == CLEAR and decided.direction == pytest.approx(0.0)
+    assert decided.forward == pytest.approx(0.35), "6 m of floor ahead is driven at full speed"
+    assert floor_down(a_scan([(0, 6.0)]), INCREMENT, 0.0, RANGE_MAX) == pytest.approx(6.0)
+    assert floor_down(a_scan(), INCREMENT, 0.0, RANGE_MAX) == inf, "nothing back is the most open answer"
 
 
 def test_a_nearer_wall_ahead_means_a_smaller_forward_command():
-    """The braking term on its own: full speed from twice `stop_gap` out, nothing at `stop_gap`.
+    """The braking term on its own: `speed` scaled by the run the driven direction has, over `brake_lead`.
 
-    Measured with one wall only, this compared two different *directions* rather than two speeds — a wall
-    dead ahead votes in the field as well as in the brake, so 1.5 m and 0.85 m differ in which way the robot
-    is pointed and the assertion was measuring the field. Here the wall that steers sits to the right in
-    both halves, and the wall in the nose cone is outside `repulsion_range` in both, so the only thing left
-    to change between the two calls is how hard the approach may be driven.
+    Both halves steer with the same wall on the right, so what is left to change is how far the direction
+    actually driven has to travel before an echo enters the clearance ring.
     """
-    steer_by = (-60, 0.55)
-    far = field(a_scan([(0, 3.00), steer_by]), INCREMENT, RANGE_MAX, aim=0.0, repulsion_range=0.6)
-    near = field(a_scan([(0, 0.70), steer_by]), INCREMENT, RANGE_MAX, aim=0.0, repulsion_range=0.6)
-    assert far.direction == pytest.approx(near.direction, abs=1e-9), "the way chosen must not be what changed"
-    assert far.forward > near.forward, "the same wall, nearer, must not ask for more speed"
+    steer_by = (radians(25), 0.90), (radians(-25), 0.90)
+    far = avoid(a_scan([(25, 0.90), (-25, 0.90)]), INCREMENT, RANGE_MAX, strafe=True)
+    near = avoid(a_scan([(25, 0.62), (-25, 0.62)]), INCREMENT, RANGE_MAX, strafe=True)
+    assert far.direction == pytest.approx(near.direction) == pytest.approx(0.0), \
+        "the way chosen must not be what changed"
+    assert far.forward > near.forward > 0.0, "the same walls, nearer, must not ask for more speed"
 
 
-def test_a_corridor_that_closes_brings_the_robot_to_a_standing_stop():
-    decided = field(a_scan([(0, 0.40)]), INCREMENT, RANGE_MAX, aim=0.0, stop_gap=0.55)
-    assert decided.state == STOPPED
-    assert (decided.forward, decided.sideways, decided.turn) == (0.0, 0.0, 0.0), \
-        "a stopped field that still turns is a robot that pivots into the wall"
-    assert "0.40" in decided.why, decided.why
+def test_a_corridor_that_closes_stops_the_wheels_and_turns_to_the_widest_gap():
+    """The state the todo's third principle is about.
+
+    This test used to assert `(forward, sideways, turn) == (0, 0, 0)` — a standing stop with no turn, on the
+    reasoning that a stopped field which still turns is a robot pivoting into the wall. That is what the
+    measured spin was: a robot with nothing in front of it and no turn is a robot that stays there, which is
+    how the old rule ended 45 s of running 3 cm from where it started. The wheels stay still — that part of
+    the old assertion was right, and `forward == 0.0` keeps it — but the nose now goes to the widest gap and
+    the node says which one it picked.
+    """
+    decided = avoid(a_scan([(0, 0.40)]), INCREMENT, RANGE_MAX)
+    assert decided.state == FIELD_BLOCKED and decided.forward == 0.0
+    assert decided.turn != 0.0, "a stopped robot with no turn is a robot that stays stopped"
+    assert "wheels stay still" in decided.why, decided.why
 
 
-def test_straight_ahead_means_twenty_degrees_and_not_the_whole_front_half():
-    """±0.35 rad of `nearest_ahead`. Wider, and the wall of a corridor 60 cm to the side counts as "ahead"
-    and stops the robot dead in a corridor it could have driven down."""
-    assert nearest_ahead(a_scan([(60, 0.40)]), INCREMENT, RANGE_MAX) is None
-    assert nearest_ahead(a_scan([(10, 0.40)]), INCREMENT, RANGE_MAX) == pytest.approx(0.40)
+def test_the_refusal_to_stand_there_for_ever_says_so_and_stops_trying():
+    """`stuck_timeout` on a robot shut in on every side: after 20 s of turning with nothing offering
+    `free_travel`, the answer is `nowhere to go` with the seconds attached, because "back out and try the
+    other side of the hall" is a program with a map in it, and this is not that program.
+    """
+    shut_in = a_scan([(0, 0.40), (90, 0.40), (180, 0.40), (-90, 0.40)])
+    still_turning = avoid(shut_in, INCREMENT, RANGE_MAX, spent=19.0)
+    assert still_turning.state == FIELD_BLOCKED and still_turning.turn != 0.0
+    given_up = avoid(shut_in, INCREMENT, RANGE_MAX, spent=20.0)
+    assert given_up.state == NOWHERE and (given_up.forward, given_up.turn) == (0.0, 0.0)
+    assert "20 s" in given_up.why, given_up.why
+
+
+def test_the_candidate_grid_is_as_coarse_as_the_wheels_and_no_coarser():
+    """5° steps, because one 0.05 s cycle at the turn limit moves the nose 3.2°: a heading between the
+    samples is a heading the robot cannot reach before it is asked again. This is the assertion that caught
+    the rewrite sampling every 25° while its own docstring said 5° — 14 headings around a robot instead of
+    72, which makes a 30° gap read as a wall.
+
+    It is also the reason the old test about "straight ahead" is gone: there is no nose cone any more. A wall
+    60 cm to the flank is a fact about the gap, and the heading down the corridor keeps its runway whatever
+    the flank says.
+    """
+    corridor = a_scan([(-90, 0.60), (90, 0.60)])
+    every = ways(corridor, INCREMENT, RANGE_MAX, 0.40, 0.80)
+    assert len(every) == 72, "one candidate per 5 beams of a 360 beam scan"
+    assert wrap(every[1].angle - every[0].angle) == pytest.approx(radians(5))
+    ahead = [w for w in every if abs(w.angle) < radians(3)]
+    assert ahead and all(w.runway > 1.0 for w in ahead), "the flank walls do not brake the corridor"
+    assert avoid(corridor, INCREMENT, RANGE_MAX).state == CLEAR
+
+
+def test_which_side_an_obstacle_is_gone_round_is_committed_and_not_re_chosen_every_cycle():
+    """The bug whose measurement opened this whole round: 13.97 m of path for 0.03 m of net, `wz` pinned at
+    ±1.1 flipping sign every 50 ms, because a fresh scan answers "which way round?" two different ways on two
+    neighbouring cycles. `held` is the answer coming back in, and it survives while the committed side stays
+    open — the two numbers it carries are the whole of what this rule remembers.
+    """
+    wall_dead_ahead = a_scan([(0, 1.00), (-50, 2.50), (50, 2.50)])
+    committed_right = avoid(wall_dead_ahead, INCREMENT, RANGE_MAX, held=radians(-35)).direction
+    committed_left = avoid(wall_dead_ahead, INCREMENT, RANGE_MAX, held=radians(35)).direction
+    assert committed_right < 0.0 < committed_left, (
+        f"held right chose {degrees(committed_right):+.0f}°, held left chose {degrees(committed_left):+.0f}°: "
+        "the side committed to on an earlier cycle is what has to decide, once there is one")
+
+
+def test_the_default_drives_where_the_nose_points_and_leaves_strafe_alone():
+    """Principle two, asserted on the wheel message rather than in prose: with the switch off, `vy` is 0.0 in
+    every state including the one that has stopped, and the chosen heading is reached by turning to it. With
+    the switch on the same scan produces a sideways command, which is the comparison the demo is for.
+    """
+    blocked_off_ahead = a_scan([(0, 0.90)])
+    car = avoid(blocked_off_ahead, INCREMENT, RANGE_MAX)
+    assert car.direction != 0.0, "the nose is pointed at a dead end, so a side is chosen"
+    assert car.sideways == 0.0, "the default never asks for a sideways wheel, in any state"
+    assert car.forward >= 0.0
+    mecanum = avoid(blocked_off_ahead, INCREMENT, RANGE_MAX, strafe=True)
+    assert mecanum.sideways != 0.0, "and it is the switch that strafes, not the scan"
 
 
 def test_the_turn_to_a_wanted_heading_goes_the_short_way_round():
@@ -392,19 +473,37 @@ def test_the_last_centimetres_of_a_drive_are_driven_slowly():
     assert nearly_there.forward < 1.0
 
 
-def test_holding_the_line_pushes_sideways_without_touching_the_forward_speed():
-    """Only a mecanum base can do this, which is the cheapest demonstration of what the wheels are for."""
-    off_to_the_left = drive_straight(0.0, 1.0, cross_track=0.20)
-    assert off_to_the_left.sideways < 0, "the line is 20 cm to the right, so the correction goes right"
-    assert off_to_the_left.forward == pytest.approx(0.25)
-    assert drive_straight(0.0, 1.0, cross_track=5.0).sideways == pytest.approx(-0.12), \
+def test_holding_the_line_pushes_sideways_only_when_a_mecanum_base_is_asked_to():
+    """ADAPTED, because the default of `drive_straight` changed and this is the line that pinned it.
+
+    What was asserted was that a cross-track error is answered by `vy`. That is still true and still tested —
+    with `strafe=True`, which is what the switch is for. What changed is the default: car-like, `vx` and `wz`,
+    because the measured 6 m run behind that decision put 1.36 m of its 8.51 m of path in the sideways
+    direction. The forward speed is untouched either way, which is the half of the test the name keeps.
+    """
+    off_the_line = drive_straight(0.0, 1.0, cross_track=0.20, strafe=True)
+    assert off_the_line.sideways < 0, "the line is 20 cm to the right, so the correction goes right"
+    assert off_the_line.forward == pytest.approx(0.25)
+    assert drive_straight(0.0, 1.0, 5.0, strafe=True).sideways == pytest.approx(-0.12), \
         "a correction beyond the wheels' reach is a command the wheels ignore"
+    assert drive_straight(0.0, 1.0, cross_track=0.20).sideways == 0.0, \
+        "the default is a car: the drift is measured and not corrected, because a car cannot hold a line " \
+                                        "with its bumper and leaning the nose would make `drive 3.0` a curve"
 
 
-def test_driving_to_a_place_walks_diagonally_at_it_and_turns_to_face_it():
+def test_driving_to_a_place_walks_diagonally_at_it_only_with_strafe_and_still_arrives_without():
+    """ADAPTED, for the same reason as the test above: `strafe` now defaults to off.
+
+    The diagonal — forward, left, and turning left, all at once — is what `strafe=True` does and is still
+    asserted. The default answer to the same pose is the car's: forward and a turn, no sideways at all.
+    """
     decided = drive_to((0.0, 0.0, 0.0), (1.0, 0.5))
-    assert decided.running and decided.forward > 0 and decided.sideways > 0 and decided.turn > 0, \
-        "the goal is ahead and to the left: forward, left, and turning left, all at once"
+    assert decided.running and decided.forward > 0 and decided.turn > 0
+    assert decided.sideways == 0.0, "the default is vx and wz"
+    diagonal = drive_to((0.0, 0.0, 0.0), (1.0, 0.5), strafe=True)
+    assert diagonal.sideways > 0, "the goal is ahead and to the left: on a mecanum base it goes left as well"
+    assert diagonal.forward == pytest.approx(decided.forward) and diagonal.turn == pytest.approx(decided.turn), \
+        "the switch adds a wheel, it does not retune the controller it is bolted to"
 
 
 def test_a_goal_within_arrive_distance_is_arrived_rather_than_approached():
@@ -413,14 +512,162 @@ def test_a_goal_within_arrive_distance_is_arrived_rather_than_approached():
     assert (arrived.forward, arrived.sideways, arrived.turn) == (0.0, 0.0, 0.0)
 
 
+def follow(step, pose, goal, seconds=60.0, dt=0.05):
+    """Close one of these controllers on an ideal odometry and return (poses, commands).
+
+    The odometry here is the truth: the pose is the command integrated, midpoint heading, no slip and no
+    noise. That is deliberate — the claim under test is that the *rule* reaches a place, which is a fact about
+    the arithmetic and not about `robot.slip` or `sensors.odom.sigma_xy`. What the same rule does against a
+    wall that zeroes its turn and a pose that keeps counting metres is a different claim, belongs to the hall,
+    and is measured by `tools/try_demo.sh`.
+    """
+    poses, commands, error_sum = [pose], [], 0.0
+    for _ in range(int(seconds / dt)):
+        forward, sideways, turn, running, error_sum = step(pose, goal, error_sum, dt)
+        commands.append((forward, sideways, turn))
+        x, y, heading = pose
+        mid = heading + 0.5 * turn * dt                       # the same midpoint the simulator integrates
+        pose = (x + (forward * cos(mid) - sideways * sin(mid)) * dt,
+                y + (forward * sin(mid) + sideways * cos(mid)) * dt, heading + turn * dt)
+        poses.append(pose)
+        if not running:
+            break
+    return poses, commands
+
+
+def drive_to_step(pose, goal, error_sum, dt):
+    """`drive_to` at the node's own published defaults, spelled out so a changed default shows up here."""
+    decided = drive_to(pose, goal, error_sum, speed=0.3, turn_limit=1.2, arrive_distance=0.12, dt=dt)
+    return decided.forward, decided.sideways, decided.turn, decided.running, decided.error_sum
+
+
+def test_the_car_like_drive_to_a_place_6_m_ahead_arrives_without_stopping_to_aim():
+    """The whole acceptance of the default, as arithmetic: 6.0 m, from a spawn facing 90° away.
+
+    The same pair of numbers `tools/try_demo.sh` prints, on an odometry that cannot lie. Before the `strafe`
+    default was changed, this run measured 20.4 s of driving and 1.36 m of sideways travel; with the switch
+    off it is 21.0 s and 6.02 m of path for 5.88 m of net — 4 % over the straight line, and the extra 0.6 s is
+    the 90° turn the car has to make and the mecanum base does not.
+
+    The assertion that keeps the two controllers different is the last one: a forward command in every cycle
+    but the 26 that the place is behind it, and exactly one stop in the run — the arrival. A sequential
+    controller would stop to aim, which is `move_to_point.py`, tested in its own file.
+    """
+    spawn, goal = (2.25, 6.25, 0.0), (2.25, 12.25)            # the `open` spawn and a place 6.0 m due north
+    poses, commands = follow(drive_to_step, spawn, goal, seconds=60.0)
+    path = sum(hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(poses, poses[1:]))
+    net = hypot(poses[-1][0] - spawn[0], poses[-1][1] - spawn[1])
+
+    assert hypot(poses[-1][0] - goal[0], poses[-1][1] - goal[1]) <= 0.12, "ends inside its own tolerance"
+    assert len(poses) * 0.05 < 30.0, f"arrived in {len(poses) * 0.05:.1f} s, not after a lecture"
+    assert path / net < 1.5, f"path {path:.2f} m for net {net:.2f} m is driving, not circling"
+    assert max(abs(sideways) for _, sideways, _ in commands) == 0.0, "the default never strafes"
+
+    behind = [c for c, p in zip(commands, poses[:-1])
+              if c[0] == 0.0 and hypot(goal[0] - p[0], goal[1] - p[1]) > 0.12]
+    assert len(behind) <= 30, f"{len(behind)} cycles with no forward command: once the place is ahead, a " \
+                                                       "car-like drive_to keeps driving and turns while it does"
+    stops = sum(1 for a, b in zip(commands, commands[1:])
+                if max(map(abs, a)) > 0.01 and max(map(abs, b)) <= 0.01)
+    assert stops == 1, "one stop in the whole run, at the end of it"
+
+
+def test_the_two_terms_of_the_mecanum_version_saturate_at_metres_nobody_tuned_them_for():
+    """Where the wall follower's bug would live here, in the two numbers that show it.
+
+    `gain_side * side` is a metre gain like the one that spun that robot for 45 s: with a place 5 m to the
+    side it asks for 3.5 m/s of strafe and `side_limit` answers 0.15 m/s, so the rule stops being
+    proportional at 0.15 / 0.7 = 0.21 m of cross-track error and every error worth correcting is inside the
+    clamp. That term is why `strafe` exists and why it is off.
+
+    The turn term clamps too, at 1.2 / 1.8 = 0.67 rad = 38° off the bearing, and that one is honest: 1.8 * pi
+    is a rate these wheels ignore. The two together are the sentence the file needs — an angle out of the
+    default, a rate ceiling on it, and no metres multiplied by anything.
+    """
+    far_to_the_left = drive_to((0.0, 0.0, 0.0), (0.5, 5.0), strafe=True)
+    assert far_to_the_left.sideways == pytest.approx(0.15), "asked 3.5 m/s, got the ceiling"
+    just_off_line = drive_to((0.0, 0.0, 0.0), (1.0, 0.20), strafe=True)
+    assert just_off_line.sideways == pytest.approx(0.7 * 0.20, abs=1e-9), "20 cm is still proportional"
+    assert 0.15 / 0.7 == pytest.approx(0.214, abs=0.001), "and that is where it stops being proportional"
+
+    at_30 = drive_to((0.0, 0.0, 0.0), (cos(radians(30)), sin(radians(30))))
+    at_40 = drive_to((0.0, 0.0, 0.0), (cos(radians(40)), sin(radians(40))))
+    assert at_30.turn == pytest.approx(1.8 * radians(30), abs=0.02), "inside the ceiling: proportional"
+    assert at_40.turn == pytest.approx(1.2), "40° off the bearing is past 38°: the ceiling, and no more"
+    assert abs(drive_to((0.0, 0.0, 0.0), (cos(radians(90)), sin(radians(90)))).forward) < 1e-9, \
+        "and at 90° there is nothing along the nose to drive at, which is the only stop this controller makes"
+
+
 def test_the_heading_integral_cannot_grow_while_a_robot_is_held_against_a_wall():
-    """`integral_limit` is the anti-windup. Without it, 30 s of being stuck is a minute of spinning after."""
+    """ADAPTED: the bound on `error_sum` moved from a clamp to a condition, and this pinned the clamp.
+
+    What was asserted was that the sum stops at `integral_limit` (1.0) after 10 s of a robot held from
+    turning. It now stops earlier and for a better reason: while `gain_turn * off` is itself past
+    `turn_limit`, the wheels are already turning as fast as they can towards the bearing, so the cycle has
+    nothing left to act with and adds nothing. Measured on that held case — a robot 90° off the bearing for
+    10 s — the sum used to reach its whole 1.0 rad·s clamp in 1.0 / (1.571 × 0.05) = 13 cycles, 0.65 s; now it
+    stays at zero, which is the difference between a wound-up integral that has to be spent afterwards and
+    one that never existed.
+
+    The other half is what keeps this from being a test of a constant zero: inside the 0.67 rad = 38° where
+    the proportional term is not clamped, the sum still grows, which is the only reason the term is there.
+    """
     error_sum = 0.0
     for _ in range(200):                                    # 10 s of a robot held from turning at 20 Hz
-        decided = drive_to((0.0, 0.0, 0.0), (0.0, 1.0), error_sum, dt=0.05)
-        error_sum = decided.error_sum
-        assert abs(error_sum) <= 1.0, "the sum left the anti-windup limit"
-    assert error_sum == pytest.approx(1.0), "held for 10 s, the term should have saturated, not drifted"
+        error_sum = drive_to((0.0, 0.0, 0.0), (0.0, 1.0), error_sum, dt=0.05).error_sum
+    assert error_sum == 0.0, "held with the turn clamped, the sum must not move at all"
+
+    error_sum = 0.0
+    for _ in range(20):                                     # 1 s at 17° off: the turn is proportional here
+        error_sum = drive_to((0.0, 0.0, 0.0), (1.0, 0.3), error_sum, dt=0.05).error_sum
+    assert error_sum == pytest.approx(0.291, abs=0.01), "0.29 rad·s after a second of a 17° error"
+    assert abs(error_sum) <= 1.0, "and integral_limit still stands behind it as the second bound"
+
+
+def test_the_integral_changes_nothing_about_arrival_in_a_hall_that_gives_it_no_work():
+    """Measured, because the module docstring sells this term and the number says it is a lecture prop.
+
+    On the 6.0 m closed loop, P-only and the shipped PI arrive at the same instant (20.95 s) and the same
+    distance from the place (0.117 m), and adding a 0.05 rad/s heading bias — `sensors.odom.bias_omega`, which
+    this simulator sets to 0.0 by default — changes that to 0.116 m for both. The reason is the geometry: a
+    heading loop that closes on the *bearing to the place* has no steady-state error to integrate away, which
+    is what an integral is for. The trace shows what it does instead: the sum peaks at 0.31 rad·s during the
+    turn at the start, spends itself over the next 6 s, and holds the 3 m line to within 0.03 rad.
+
+    So the term is kept for the trade it demonstrates — the module docstring's "add the I term and watch the
+    overshoot appear" — and not for a benefit claimed here, and the one thing it measurably cost, 13 cycles of
+    windup against a wall that refuses the turn, is what the test above now bounds.
+    """
+    def closed(gain_integral, bias=0.0, dt=0.05):
+        pose, error_sum = (0.0, 0.0, 0.0), 0.0
+        for _ in range(int(60.0 / dt)):
+            decided = drive_to((pose[0], pose[1], pose[2]), (0.0, 6.0), error_sum,
+                               gain_integral=gain_integral, dt=dt)
+            error_sum = decided.error_sum
+            turn = decided.turn + bias
+            mid = pose[2] + 0.5 * turn * dt
+            pose = (pose[0] + decided.forward * cos(mid) * dt, pose[1] + decided.forward * sin(mid) * dt,
+                    pose[2] + turn * dt)
+            if not decided.running:
+                return hypot(pose[0], pose[1] - 6.0)
+        return hypot(pose[0], pose[1] - 6.0)
+
+    assert closed(0.0) == pytest.approx(closed(0.25), abs=1e-3), "no bias: the same arrival either way"
+    assert closed(0.0, bias=0.05) == pytest.approx(closed(0.25, bias=0.05), abs=1e-3), \
+        "a bias the size of a dragging motor: still the same, because the bearing loop is the feedback"
+    assert closed(0.25) < 0.12, "and both of them arrive"
+
+
+def test_the_arrival_line_names_the_place_and_says_whether_the_tolerance_was_met():
+    """A stop that prints nothing is a silent freeze with a pose attached — see the three principles.
+
+    `drive_to` finishes on `arrive_distance`, not on the place, so the residue is the number a lecture should
+    see, and 0.11 m and 0.30 m look the same as a bare coordinate. The words are the judgement, and they are
+    a function so that the judgement can be tested without a graph.
+    """
+    assert "inside the 0.12 m tolerance" in arrive_words(0.108, 0.12)
+    assert "outside its own 0.12 m tolerance" in arrive_words(0.30, 0.12), \
+        "the sentence has to be able to admit that the controller missed"
 
 
 # ------------------------------------------------------------------------------- the split itself

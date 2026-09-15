@@ -130,21 +130,30 @@ def test_the_wall_follower_draws_the_four_bearings_it_reads_and_the_gap_it_keeps
     assert by_namespace["numbers"].text.startswith(FOLLOWING), "the sentence over the robot is the log's own"
 
 
-def test_the_field_draws_the_votes_the_wish_the_sum_and_the_wheels():
-    node = SimpleNamespace(view_pub=Recorder(), scan=a_scan(1.2), scan_frame="muster/base_link/laser", aim=0.0,
-                           settings=dict(repulsion_range=2.0, speed=0.35, turn_limit=1.1, turn_gain=1.6,
-                                         stop_gap=0.55, half_view=0.35),
-                           range_max=8.0, increment=TWO_PI / 360, get_clock=Clock)
-    by_namespace = drawn_by(obstacle_avoidance.ObstacleAvoidance.draw, node,
-                            Decision(0.3, 0.1, 0.4, 0.3, CLEAR, ""))
+def test_the_field_draws_what_it_measured_the_gap_it_keeps_and_the_gap_it_chose():
+    """The overlay of the rewrite, named rather than eyeballed.
 
-    assert {"votes", "aim", "field", "command", "numbers"} <= set(by_namespace)
-    assert len(by_namespace["votes"].points) == 720, \
-        "an arrow per voting beam — two points each, and every beam of this scan votes"
-    assert by_namespace["aim"].points[1].x == 1.0, "the wish is a unit vector along the nose"
-    assert by_namespace["numbers"].text.startswith(CLEAR)
-    assert all(by_namespace[name].points for name in ("votes", "aim", "field", "command")), \
-        "an empty marker is invisible in exactly the way a wrong frame is, and is far more often the reason"
+    This test used to pin the repulsion field: 720 vote arrows, a `field` namespace for the sum of them, and a
+    `settings` dict naming `repulsion_range`, `stop_gap` and `half_view` — all of which described the rule that
+    crab-walked a robot 10.67 m of path for 0.02 m of net. What the rule reads now is a clearance ring, the
+    runway of every candidate heading, which of those headings the two thresholds closed, and the gap it picked
+    from among them, so that is what goes out — and every one of them has to have points in it, because an
+    empty marker is invisible in exactly the way a wrong frame is, and is far more often the reason.
+    """
+    node = SimpleNamespace(view_pub=Recorder(), scan=a_scan(1.2), scan_frame="muster/base_link/laser", aim=0.0,
+                           clearance=0.40, range_max=8.0, increment=TWO_PI / 360, get_clock=Clock,
+                           settings=dict(brake_lead=0.80, free_travel=0.25, open_floor=3.0))
+    by_namespace = drawn_by(obstacle_avoidance.ObstacleAvoidance.draw, node,
+                            obstacle_avoidance.Decision(0.3, 0.0, 0.4, 0.35, CLEAR, "", 0.35, 1.2, 0.0))
+
+    assert {"beams", "clearance", "travel", "closed", "aim", "gap", "command", "numbers"} \
+        == set(by_namespace), sorted(by_namespace)
+    assert all(marker.points for name, marker in by_namespace.items() if name != "numbers"), \
+        "a namespace with no points is the same invisible as a frame nobody publishes"
+    assert len(by_namespace["clearance"].points) > 4, "the ring is drawn, not described"
+    assert len(by_namespace["gap"].points) == 2, "the gap it chose is an arrow: two points"
+    assert by_namespace["command"].points[1].x > 0, "the wheel command goes out along the nose it drives"
+    assert by_namespace["numbers"].text.startswith(CLEAR), "the sentence over the robot is the log's own"
 
 
 def test_nothing_is_drawn_at_all_when_a_node_has_no_view_publisher():
@@ -157,9 +166,10 @@ def test_nothing_is_drawn_at_all_when_a_node_has_no_view_publisher():
                                range_max=8.0, increment=TWO_PI / 360, get_clock=Clock)
     wall_following.WallFollower.draw(follower, Steering(0.3, 0.0, FOLLOWING, 0.4, 0.0, True, 0.0))
 
-    field = SimpleNamespace(view_pub=None, scan=a_scan(), scan_frame="f", aim=0.0,
-                            settings=dict(repulsion_range=2.0), range_max=8.0, increment=TWO_PI / 360,
-                            get_clock=Clock)
-    obstacle_avoidance.ObstacleAvoidance.draw(field, Decision(0.0, 0.0, 0.0, 0.0, CLEAR, ""))
+    field = SimpleNamespace(view_pub=None, scan=a_scan(), scan_frame="f", aim=0.0, clearance=0.4,
+                            settings=dict(brake_lead=0.80, free_travel=0.25, open_floor=3.0), range_max=8.0,
+                            increment=TWO_PI / 360, get_clock=Clock)
+    obstacle_avoidance.ObstacleAvoidance.draw(
+        field, obstacle_avoidance.Decision(0.0, 0.0, 0.0, 0.0, CLEAR, "", 0.0, 0.0, 0.0))
 
     assert view_markers.publish(None, [view_markers.dots("f", Time(sec=1), "ns", [(0.0, 0.0)])]) is None
