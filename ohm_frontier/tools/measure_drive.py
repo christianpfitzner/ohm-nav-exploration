@@ -1,6 +1,6 @@
 """Measure what a controller actually did, in metres — the number a state line cannot give you.
 
-    python3 tools/measure_drive.py muster 60 /tmp/wall.csv          # hall, robot, seconds, csv
+    python3 tools/measure_drive.py muster 60 /tmp/wall.csv [clearance]   # robot, seconds, csv, m
 
 A reactive demo can print `following: wall 0.52 m` a thousand times and still have gone nowhere, and the
 eye in the simulator's window is a poor instrument for that: a robot turning on the spot with a small
@@ -17,6 +17,16 @@ its find-the-wall phase existed: **17.15 m of path, 0.45 m of net**, in 45 s, wi
 `following` the whole time. The CSV columns of the lidar distances are what tells you why: the bearing the
 rule reads, and how far the thing in that direction actually was.
 
+The rest of the report is the three questions a limit cycle and a near miss both hide behind a healthy
+state line:
+
+* **furthest from the spawn** — how far the robot ever got from where it started, which is the reach of the
+  rule rather than the distance it travelled;
+* **nearest echo**, and how often anything came inside `clearance` (0.30 m by default, a little over the
+  robot's own 0.23 m radius) — because a demo that gets somewhere by brushing the walls has avoided nothing;
+* **turn sign flips** — how often the commanded turn changed its mind. Five flips a minute in a corridor is a
+  rule re-deciding itself every cycle, which is what a limit cycle looks like from the outside.
+
 Run it against a live stack: `ros2 launch ohm_frontier reactive_wall_follow.launch.py headless:=true
 robot:=muster` in one terminal, this in another. `use_sim_time` is irrelevant here — the clock in the CSV is
 wall-clock seconds since this started, because the question is "how far did it get in a minute".
@@ -31,6 +41,8 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
+
+CLEARANCE = 0.30        # m, a little over the robot's own 0.23 m radius: closer than this is a near miss
 
 #: the bearings the reactive family looks in, named as the demos name them
 BEARINGS = (("ahead", 0.0, 3), ("right", -math.pi / 2, 2), ("right_ahead", -math.pi / 4, 2),
@@ -63,9 +75,10 @@ def main(argv):
     if len(argv) < 3:
         raise SystemExit(__doc__)
     robot, seconds, out = argv[1], float(argv[2]), argv[3] if len(argv) > 3 else "/tmp/drive.csv"
+    clearance = float(argv[4]) if len(argv) > 4 else CLEARANCE
     rclpy.init()
     node = Node("measure_drive")
-    seen = {"odom": None, "cmd": None, "scan": None}
+    seen = {"odom": None, "cmd": None, "scan": None, "echoes": []}
     node.create_subscription(Odometry, f"/{robot}/odom", lambda m: seen.__setitem__("odom", m), 10)
     node.create_subscription(Twist, f"/{robot}/cmd_vel", lambda m: seen.__setitem__("cmd", m), 10)
     node.create_subscription(LaserScan, f"/{robot}/scan", lambda m: seen.__setitem__("scan", m), 10)
@@ -77,11 +90,11 @@ def main(argv):
             continue
         odom, cmd, scan = seen["odom"], seen["cmd"], seen["scan"]
         p = odom.pose.pose.position
+        seen["echoes"] = [beam(scan, angle, window) for _, angle, window in BEARINGS]
         rows.append([round(time.time() - start, 2), round(p.x, 2), round(p.y, 2), round(yaw_of(odom), 2),
                      round(cmd.linear.x, 3) if cmd else "",
                      round(cmd.linear.y, 3) if cmd else "",
-                     round(cmd.angular.z, 3) if cmd else ""]
-                    + [beam(scan, angle, window) for _, angle, window in BEARINGS])
+                     round(cmd.angular.z, 3) if cmd else ""] + seen["echoes"])
         if len(rows) % 40 == 0:
             last = rows[-1]
             print(f"{last[0]:6.1f} s  x={last[1]:7.2f} y={last[2]:7.2f} yaw={last[3]:+6.2f}  "
@@ -111,9 +124,18 @@ def main(argv):
             if worst[0] is None or moved < worst[0]:
                 worst = (moved, rows[i][0])
     strafed = [abs(r[5]) for r in rows if r[5] != ""]
+    echo = [float(v) for r in rows for v in r[7:] if v != ""]
+    reach = max(math.dist(points[0], p) for p in points)
+    turning = [r[6] for r in rows if r[6] != "" and abs(r[6]) > 0.05]
+    flips = sum(1 for a, b in zip(turning, turning[1:]) if a * b < 0)
     ratio = f"{path / net:.1f}" if net > 0.05 else "— it came back to itself"
     print(f"\n{len(rows)} samples over {seconds:.0f} s on /{robot}/odom")
     print(f"  path {path:6.2f} m   net {net:6.2f} m   path/net {ratio}")
+    print(f"  furthest from the spawn: {reach:.2f} m")
+    if echo:
+        print(f"  nearest echo: {min(echo):.2f} m   inside {clearance:.2f} m in "
+              f"{sum(1 for e in echo if e < clearance)} of {len(echo)} readings")
+    print(f"  turn sign flips: {flips} in {len(turning)} turning samples")
     print(f"  worst 10 s: {worst[0]:.2f} m of net displacement, starting at t={worst[1]:.0f} s"
           if worst[0] is not None else "  run too short for a 10 s window")
     if strafed:
