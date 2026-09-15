@@ -54,9 +54,11 @@ import os
 
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction,
+                            TimerAction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -94,6 +96,14 @@ def generate_launch_description():
                               description="m; a `go` goal inside this counts as reached"),
         DeclareLaunchArgument("turn_tolerance", default_value="0.05",
                               description="rad; the P controller never arrives, this declares it finished"),
+        DeclareLaunchArgument("goal", default_value="4.0,2.0",
+                              description="a place to drive to as `x y`, published once on `/frontier_goal` "
+                                          "six seconds in; empty for none. `turn` and `drive` are typed and the "
+                                          "node waits for them, so without this the run is a robot sitting in an "
+                                          "empty hall printing `waiting for a command` — measured: 0.14 m of path "
+                                          "and 0.00 m of net in 45 s, which is the node waiting and not the node "
+                                          "failing. A pose on the frontier goal topic, because the third "
+                                          "primitive is the one that used to circle"),
         DeclareLaunchArgument("strafe", default_value="false",
                               description="command vy as well as vx and wz. Off: the default run is car-like, "
                                           "because 49 % of the samples of a 6 m goal otherwise carried a sideways "
@@ -121,4 +131,28 @@ def generate_launch_description():
                 "strafe": ParameterValue(LaunchConfiguration("strafe"), value_type=bool),
             }],
         ),
+
+        # Six seconds in, one place on the topic the frontier node would use. The reading of it rather than the
+        # substituting is because a launch condition understands only `true/1/false/0` and "is there a place at
+        # all" is a question about a pair of coordinates, not a boolean.
+        OpaqueFunction(function=publishes_a_goal, args=[LaunchConfiguration("goal")]),
     ])
+
+
+def publishes_a_goal(context, *args, **kwargs):
+    """One `PoseStamped` on `/frontier_goal`, six seconds after the hall comes up.
+
+    The same arrangement `move_to_point.launch.py` makes, for the same reason. The position is taken as
+    odometry coordinates and the node says so once in a warning that is itself part of the demo: this node has
+    no tf, the frontier node publishes in the frame of the map, and the difference between those two frames is
+    the mapper's correction for the odometry drifting.
+    """
+    goal = perform_substitutions(                                     # noqa: E731
+        context, normalize_to_list_of_substitutions(args[0])).strip().replace(",", " ")
+    if not goal:
+        return []
+    x, _, y = goal.partition(" ")
+    place = "{header: {frame_id: odom}, pose: {position: {x: %s, y: %s}, orientation: {w: 1.0}}}" % (x, y)
+    return [TimerAction(period=6.0, actions=[ExecuteProcess(
+        cmd=["ros2", "topic", "pub", "--once", "/frontier_goal", "geometry_msgs/msg/PoseStamped", place],
+        name="turn_and_move_goal", output="screen")])]

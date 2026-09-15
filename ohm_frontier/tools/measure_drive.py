@@ -43,41 +43,45 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
 CLEARANCE = 0.30        # m, a little over the robot's own 0.23 m radius: closer than this is a near miss
-PATH_HZ = 10.0          # Hz: how often a position counts as a step of the path. Not taste — the simulator's
-                        # odometry carries a few millimetres of noise into every update and `/odom` is bridged
-                        # at ~87 Hz, so summed sample-to-sample the noise *is* travel: this robot, parked and
-                        # showing 0.00 m/s, accumulated **6.49 m of "path" in 22 s**, and a run of 6.87 m
-                        # straight read 17.33 m. At 10 Hz the parked stretch reads 0.27 m and the straight run
-                        # 7.22 m, which is the same walk with the noise off it.
+DEADBAND = 0.05         # m: how far the position has to move before it counts as travel. Not taste: this
+                        # simulator's odometry redraws a robot that is standing still with its wheels commanded
+                        # to exactly zero by up to 40 mm between samples (p50 10 mm, p90 30 mm, p99 40 mm over
+                        # one 50 s run), and 32.06 m of that added up in the 30 s after one robot arrived. The
+                        # band sits above that p99 and below the 35 mm one sample of crawling forward at
+                        # 0.3 m/s would be, which is the whole argument for its size — see `path_length`.
 
 #: the bearings the reactive family looks in, named as the demos name them
 BEARINGS = (("ahead", 0.0, 3), ("right", -math.pi / 2, 2), ("right_ahead", -math.pi / 4, 2),
             ("right_behind", -3 * math.pi / 4, 2), ("left", math.pi / 2, 2), ("behind", math.pi, 4))
 
 
-def split_path(points, t0, span, hz=PATH_HZ):
-    """(path over positions ~`hz` apart, metres of step-sum that decimation left out).
+def path_length(points, deadband=DEADBAND):
+    """(the robot's path, the step-sum that a plain sum of samples would have reported).
 
-    Two ways of adding up the same walk that differ by a factor of two on this robot, and the difference is
-    the sensor and not the driving — see `PATH_HZ`. Decimating by index alone is what the first version did
-    and it does not fix it: the bridge's rate drifts between 80 and 94 Hz across a run, so an index stride
-    lands wherever it lands. This picks the sample nearest each `1/hz` instant in *time*, which is the same
-    10 Hz walk whether the bridge is running fast or slow.
+    The anchor method, and the reason is in the numbers: this simulator's odometry moves by up to 40 mm between
+    two samples — p50 10 mm, p90 30 mm, p99 40 mm, measured over one 50 s run — while the robot inside it is
+    *standing still with its wheels commanded to exactly zero* (max |vx| and |wz| in that stretch: 0.000).
+    Summed, that is 32.06 m of "travel" in 30 s, and decimating does not fix it: at 10 Hz the same parked
+    stretch still reads 29.98 m, because the jitter is not high frequency, it is the position being redrawn
+    inside a 1 cm box thousands of times.
+
+    So the path is walked with an anchor: the position is only believed once it has moved more than `deadband`
+    from the last believed position, and the distance counted is to that new position. A robot that is not
+    going anywhere never reaches the deadband and its path stays at nil; a robot that is going somewhere crosses
+    it every few centimetres and loses the residual, which is the price. `DEADBAND` sits above the p99 of the
+    noise and well under the 3.5 cm one sample of crawling travel at 0.3 m/s would be, which is the whole
+    argument for its size.
     """
     raw = sum(math.dist(points[i], points[i + 1]) for i in range(len(points) - 1))
-    if span <= 0 or len(points) < 3:
-        return raw, 0.0
-    every, sampled, taken = 1.0 / hz, [points[0]], [0]
-    want, n = every, len(points)
-    while want < span:
-        i = min(n - 1, int((want / span) * (n - 1)))       # the sample nearest this instant
-        if i != taken[-1]:
-            taken.append(i)
-            sampled.append(points[i])
-        want += every
-    decimated = sum(math.dist(sampled[i], sampled[i + 1]) for i in range(len(sampled) - 1))
-    return decimated, raw - decimated
-
+    if not points:
+        return 0.0, 0.0
+    anchor, path = points[0], 0.0
+    for p in points[1:]:
+        step = math.dist(anchor, p)
+        if step > deadband:
+            path += step
+            anchor = p
+    return path, raw
 
 
 def yaw_of(odom) -> float:
@@ -149,7 +153,7 @@ def main(argv):
     # 6.9 m. Net displacement and reach are not sums of steps and are unaffected — which is why the two
     # numbers are quoted together and the ratio is the one to be careful with.
     span = rows[-1][0] - rows[0][0]
-    path, jitter = split_path(points, rows[0][0], span, PATH_HZ)
+    path, raw_path = path_length(points)
     net = math.dist(points[0], points[-1])
     # The worst 10 s window: a robot that is stuck somewhere is stuck for a stretch of the run, not at its
     # end, and a total over the whole run is how a stuck stretch hides inside a good one.
@@ -168,8 +172,8 @@ def main(argv):
     ratio = f"{path / net:.1f}" if net > 0.05 else "— it came back to itself"
     print(f"\n{len(rows)} samples over {seconds:.0f} s on /{robot}/odom")
     print(f"  path {path:6.2f} m   net {net:6.2f} m   path/net {ratio}"
-          f"   (heard at {len(rows) / span:.0f} Hz, summed at {PATH_HZ:.0f} Hz:"
-          f" {jitter:.2f} m of odom step-sum left out)")
+          f"   (steps under {DEADBAND * 100:.0f} mm are odometry redrawn in place, not travel:"
+          f" {raw_path - path:.2f} m of the {raw_path:.2f} m step-sum was that)")
     print(f"  furthest from the spawn: {reach:.2f} m")
     if echo:
         print(f"  nearest echo: {min(echo):.2f} m   inside {clearance:.2f} m in "
