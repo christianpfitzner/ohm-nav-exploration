@@ -38,11 +38,15 @@ pidfile=/tmp/try_${robot}.pid
 # checkout's own overlay if someone has built it. A caller that sourced something else first keeps what it
 # sourced — this only runs when `ros2` is missing, which is the difference between "wrong tree" and "no tree".
 if ! command -v ros2 >/dev/null 2>&1; then
+  set +u            # the ROS setup scripts read AMENT_PREFIX_PATH and friends, which `set -u` calls unset;
+                    # sourced without this the script died before printing a single line, which is the worst
+                    # way for a measurement harness to fail
   # shellcheck disable=SC1091
   . "/opt/ros/${ROS_DISTRO:-kilted}/setup.bash" 2>/dev/null || true
-  workspace=$(cd "$tools/../.." && pwd)        # the checkout that holds this file, which is where its install/ is
+  workspace=$(cd "$tools/../.." && pwd)     # the checkout holding this file, where its install/ would be
   # shellcheck disable=SC1091
   [ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"
+  set -u
 fi
 if ! command -v ros2 >/dev/null 2>&1; then
   echo "ros2 is not on PATH and /opt/ros/${ROS_DISTRO:-kilted} did not provide it — nothing was started" >&2
