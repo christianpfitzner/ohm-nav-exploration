@@ -1,56 +1,22 @@
-# The frontier view — a template, not a config.
+# The driver's view — the same thirteen displays as `explore.rviz`, on a camera for one robot.
 #
-# `<robot>` is replaced by the launch file at start (`written()` in launch/explore.launch.py, the same
-# substitution the two parameter files go through) and the result lands in the temporary directory.
-# RViz 2 has no way to put the robot's name into a display's topic itself, and every topic of a robot in
-# this project carries that name — `/carlo/scan` is not `/muster/scan`. So edit **this** file, never the
-# generated one: the generated one is rewritten on the next start.
+# Everything in this file is the frontier view, down to the namespaces and the QoS notes, with one block
+# changed: the camera. `explore.rviz` orbits at 20 m because the thing being discussed there is a 30 × 20 m
+# hall — where the frontiers are, which one was chosen, what the costmap closes off. `move_to_point.launch.py`
+# opens this one instead, because the thing being discussed there is a robot two metres across and the two
+# quantities a control lecture reads off the screen are its phase and its heading error, written over it as
+# text 0.30 m tall.
 #
-# Fixed frame `map`, because from `tf_tree:=slam` on, `map → <robot>/odom` is the mapper's edge and the
-# top of the tree (launch/explore.launch.py explains who publishes what). The four things an exploration
-# run has to show are the four named below, and each is one of the owner's questions:
+# That distance is not a preference either, it was measured from both ends with screenshots of real runs: at
+# 20 m the geometry reads and the text does not appear on screen at all, and at 6 m the text is legible but
+# the letters are half the hall wide. 8 m is where the sentence over the robot and the goal line to the place
+# are both on the screen without touching the mouse. Text in a marker is metres tall and a camera in RViz
+# cannot scale it, so a run that shows one has to give up the other — which is the same trade-off as the
+# tolerance cone being drawn as lines instead of named in the label.
 #
-#   map                    the mapper's answer to "what does the hall look like", three states per cell
-#   the trajectory         where this robot has actually been — an Odometry display keeps its last poses
-#   the frontiers          every candidate, `/frontiers` as a MarkerArray (namespaces `frontiers` and
-#                          `selected`, published by frontier_node)
-#   the goal it chose      `/frontier_goal`, the same pose the nav2 action got
-#
-# Then the four overlays that carry the arithmetic, because a marker topic is the only way to put a *reason*
-# on a screen: `/frontiers` also carries the score of every candidate and the countdown of the goal timeout
-# (`frontier_node`), and the three reactive nodes each publish what they sensed, what they wanted and what
-# they commanded — `/wall_view`, `/field_view`, `/move_view` (`view_markers.py` builds all of them, one
-# namespace per kind so each is a checkbox here rather than a code edit). They are all enabled, and they do
-# not fight: only the node actually running has a publisher, an empty topic draws nothing, and the reactive
-# ones live in the robot's own frame while the frontier ones live in the mapper's.
-#
-# The costmaps are the other half of "why did it not go there", and both are latched like `/map`. The global
-# one is drawn at a low alpha over the map, because the lesson is the difference between the two — the free
-# corridor in the map and the no-go band around it in the costmap. The local one is switched off rather than
-# translucent: two costmaps at 30 % over a map is a brown rectangle, and a checkbox is one click.
-#
-# TF is on. It is the display that shows the mapper's correction as a distance — `map → <robot>/odom` is the
-# edge slam_toolbox owns, and watching it grow while the robot drives is the fastest way to make the point
-# that odometry and the hall disagree (`frontiers.py` and `pose_on_map` have the same argument in numbers).
-#
-# One fixed frame, `map`, serves every demo in this package: the simulator publishes `map → <robot>/odom →
-# <robot>/base_link` itself with that edge an identity while nobody else claims it (`robot_frames` and the
-# comment on `map_to_odom` in `mecanum_lab/types.py`), so the reactive launches — no mapper, no planner —
-# still have a tree to draw in.
-#
-# Two QoS settings here are worth the lines they take, because both are the kind that shows up as an empty
-# window rather than as an error. `Reliability Policy: Reliable` on the scan: the simulator publishes
-# standard (reliable) QoS on every topic, `mecanum_lab/ros_bridge.py` says so in its own header, while a
-# LaserScan display in RViz 2 arrives asking for best effort — which does match a reliable publisher, since
-# only a *reliable* subscriber refuses a best-effort publisher, not the other way round. Asking for Reliable
-# is the setting that cannot miss, and it is what nav2's own view does for the maps. The Map display needs
-# `Durability Policy: Transient Local` for a different reason: slam_toolbox latches `/map`, so a volatile
-# subscriber that joins late sees nothing until the next map update — which, on a map of a finished run,
-# never comes, and "the map was there when I started RViz first" is the symptom of that.
-#
-# No `Unreliable:` or `Description:` keys, which an older RViz had: neither string exists in
-# `librviz_default_plugins.so` on this ROS release, RViz 2 writes reliability inside the topic as
-# `Reliability Policy`, and an unknown key in a display is ignored in silence rather than reported.
+# `<robot>` is replaced by the launch file at start, exactly as in `explore.rviz`; edit *this* checkout's copy,
+# never the generated one in the temporary directory.
+
 Panels:
   - Class: rviz_common/Displays
     Help Height: 78
@@ -349,15 +315,15 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 20
+      Distance: 8
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.06
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 6
-        Y: 4
+        X: 3
+        Y: 6
         Z: 0
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05

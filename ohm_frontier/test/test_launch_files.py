@@ -35,6 +35,12 @@ HERE = pathlib.Path(__file__).resolve().parents[1]
 SHARES = {"ohm_frontier": "/opt/fake/ohm_frontier", "mecanum_lab": "/opt/fake/mecanum_lab",
           "nav2_bringup": "/opt/fake/nav2_bringup", "slam_toolbox": "/opt/fake/slam_toolbox"}
 VIEW = HERE / "config" / "explore.rviz"
+DRIVE = HERE / "config" / "drive.rviz"
+
+#: Every view this package ships. The structural checks below run over all of them rather than over one of
+#: them, because `drive.rviz` is derived from `explore.rviz` by editing the camera — a second config that no
+#: test opens is a second config whose display classes nobody has ever checked against this RViz.
+VIEWS = (VIEW, DRIVE)
 
 #: the hall each scenario file is named after, and whatever else it fixes beyond the hall
 SCENARIOS = {"explore_rooms.launch.py": ("rooms", {}),
@@ -158,8 +164,8 @@ def survey(node, found=None):
     return found
 
 
-def view():
-    return yaml.safe_load(open(VIEW))
+def view(path=VIEW):
+    return yaml.safe_load(open(path))
 
 
 def test_every_launch_file_avoids_the_import_that_does_not_exist():
@@ -363,10 +369,35 @@ def test_the_view_is_decided_before_the_simulator_is_allowed_to_answer_for_its_n
             f"{seen['simulator']}, so `rviz` is the simulator's answer by then"
 
 
+def test_the_drivers_view_is_the_frontier_view_on_a_closer_camera_and_nothing_else():
+    """Two files, one view: everything but the camera block and the comment above it has to agree.
+
+    `drive.rviz` exists because text in a marker is metres tall and a camera cannot scale it — the phase and the
+    heading error are readable over the robot at 8 m and gone at 20 m, and the hall only fits at 20 m. That is a
+    reason for a second *camera*, not for a second *view*: the moment the two files differ in a display, a
+    lecturer who moves between the frontier run and the control demo is comparing two different sets of overlays
+    and wondering why. So the difference is checked, not hoped for.
+    """
+    front, driver = yaml.safe_load(open(VIEW)), yaml.safe_load(open(DRIVE))
+    assert front["Visualization Manager"]["Displays"] == driver["Visualization Manager"]["Displays"], \
+        "the same thirteen displays, with the same topics, the same QoS and the same names"
+    assert front["Visualization Manager"]["Global Options"] == \
+        driver["Visualization Manager"]["Global Options"], "one fixed frame, `map`, for everything"
+    assert front["Visualization Manager"]["Tools"] == driver["Visualization Manager"]["Tools"], \
+        "the same measure and focus tools"
+    assert front["Panels"] == driver["Panels"], "the same panels, so a lecturer's mouse lands in the same place"
+
+    near = driver["Visualization Manager"]["Views"]["Current"]
+    far = front["Visualization Manager"]["Views"]["Current"]
+    assert near["Distance"] < far["Distance"], "the driver's camera is the closer of the two, which is the point"
+    assert set(near) == set(far), "and the only differences are inside the camera, not new kinds of camera"
+    assert yaml.safe_load(open(VIEW))["Visualization Manager"]["Displays"], "both files parse as RViz configs"
+
+
 def test_the_view_is_yaml_and_shows_the_four_things_a_run_has_to_show():
     """The map, where the robot has been, every frontier there is, and the one it chose. A display class
     spelled wrong loses one of those four and says nothing while it is missing."""
-    by_topic = {topic.replace("<robot>/", ""): cls for cls, _, topic in survey(view())["topics"]
+    by_topic = {topic.replace("<robot>/", ""): cls for cls, _, topic in survey(view(VIEW))["topics"]
                 if cls and cls.startswith("rviz_default_plugins/")}
     assert by_topic["/map"] == "rviz_default_plugins/Map", by_topic
     assert by_topic["/odom"] == "rviz_default_plugins/Odometry", "the trajectory: the poses it kept"
@@ -378,17 +409,19 @@ def test_the_view_is_yaml_and_shows_the_four_things_a_run_has_to_show():
         "from tf_tree:=slam on, map is the top of the tree and the frame the map message names"
 
 
-def test_the_robots_name_reaches_the_view_it_has_to_be_in(monkeypatch):
+@pytest.mark.parametrize("config", VIEWS)
+def test_the_robots_name_reaches_the_view_it_has_to_be_in(monkeypatch, config):
     """`/carlo/scan` is not `/muster/scan`, and RViz has no way to substitute a name into a topic itself."""
-    assert "<robot>" in open(VIEW).read(), "the view is a template; a baked-in name is the bug, not the fix"
+    assert "<robot>" in open(config).read(), "the view is a template; a baked-in name is the bug, not the fix"
     module = launch_file("explore.launch.py", monkeypatch, installed=("ohm_frontier",))
-    filled = open(module.written(str(VIEW), "carlo")).read()
+    filled = open(module.written(str(config), "carlo")).read()
     assert "<robot>" not in filled
     assert "/carlo/scan" in filled and "/carlo/odom" in filled
     yaml.safe_load(filled)                          # still a config, not merely still a string
 
 
-def test_the_view_names_only_display_classes_this_rviz_declares():
+@pytest.mark.parametrize("config", VIEWS)
+def test_the_view_names_only_display_classes_this_rviz_declares(config):
     """A `Class:` no plugin declares is dropped at start-up, quietly, and the window then shows one thing
     too few. The names are checked against what the installed plugin library declares, not against memory."""
     try:
@@ -397,27 +430,29 @@ def test_the_view_names_only_display_classes_this_rviz_declares():
         pytest.skip("no rviz_default_plugins on this machine")
     declared_names = set(re.findall(r'name="([^"]+)"',
                                     open(os.path.join(share, "plugins_description.xml")).read()))
-    used = {c for c in survey(view())["classes"] if c.startswith("rviz_default_plugins/")}
+    used = {c for c in survey(view(config))["classes"] if c.startswith("rviz_default_plugins/")}
     missing = sorted(c for c in used if c not in declared_names)
     assert not missing, f"no installed RViz plugin declares {missing}"
 
 
-def test_the_view_carries_no_key_rviz_two_does_not_read():
+@pytest.mark.parametrize("config", VIEWS)
+def test_the_view_carries_no_key_rviz_two_does_not_read(config):
     """`Unreliable:` and a display's `Description:` are RViz 1 keys. Neither string exists in
     `librviz_default_plugins.so` on this release — reliability is the topic's `Reliability Policy` there and
     a display is named by `Name` — and an unknown key is read in silence, so the window simply lacks the
     thing the config believed it had set."""
-    keys = survey(view())["keys"]
+    keys = survey(view(config))["keys"]
     for stale in ("Unreliable", "Description"):
         assert stale not in keys, f"{stale}: is an RViz 1 key that does nothing here"
 
 
-def test_the_view_asks_for_the_qos_that_matches_what_this_stack_publishes():
+@pytest.mark.parametrize("config", VIEWS)
+def test_the_view_asks_for_the_qos_that_matches_what_this_stack_publishes(config):
     """The simulator publishes standard (reliable) QoS everywhere — `mecanum_lab/ros_bridge.py` says so in
     its own header — and slam_toolbox latches `/map`. So the scan asks for Reliable rather than the
     best-effort default an RViz LaserScan arrives with, and the map asks for Transient Local: a volatile
     subscriber that joins after the run is over never sees a latched topic at all."""
-    by_value = {block["Value"]: block for block in qos_blocks(view()) if "Value" in block}
+    by_value = {block["Value"]: block for block in qos_blocks(view(config)) if "Value" in block}
     assert by_value["/<robot>/scan"]["Reliability Policy"] == "Reliable"
     assert by_value["/map"]["Durability Policy"] == "Transient Local", "/map is latched"
     assert by_value["/map_updates"]["Reliability Policy"] == "Reliable"

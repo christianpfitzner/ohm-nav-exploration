@@ -25,8 +25,9 @@ ohm_frontier/
   launch/frontier.launch.py       this node alone, for when the rest is already running
   config/slam_toolbox.yaml        the mapper: cell size, when a scan is worth adding, loop closure
   config/nav2_rooms.yaml          nav2 for one simulated robot: frames, topics, costmaps
-  config/explore.rviz             the one view: map, lidar, trajectory, plan, every frontier, the goal, the
-                                  costmaps, TF, and each control demo's own overlay
+  config/explore.rviz             the view: map, lidar, trajectory, plan, every frontier, the goal, the costmaps,
+                                  TF, and each control demo's own overlay
+  config/drive.rviz               the same thirteen displays on a camera 8 m from the robot, for the control demo
   test/                           the frontier rules, the life of a goal, the reactive maths, the launch files
 docs/, install.sh, INSTALL.md     the explanation; and ./install.sh --check for what a machine lacks
 ```
@@ -189,12 +190,13 @@ cd ohm_frontier && python3 -m pytest test              # the rules, with no ROS 
 One thing costs a student an hour, so it goes here: **in a shell that has ROS sourced that last command dies
 before it collects anything.** ROS 2 Kilted advertises a `launch_testing` pytest plugin whose hook arguments
 the pip pytest here (9.1.1) no longer accepts, so the suite needs `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
-python3 -m pytest test -q` — the same line `./install.sh --check` prints. Measured with that: **91 passed**,
+python3 -m pytest test -q` — the same line `./install.sh --check` prints. Measured with that: **102 passed**,
 in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the working directory. What is covered is in the
 test names: the frontier rules, the life of a goal from candidate to blacklist, the reactive maths, the markers
 each demo draws, and the launch files — a launch file being the one kind of file here whose wrong imports were
-invisible until someone typed `ros2 launch`. The two newest of those paid for themselves the day they were
-written: one compares every `executable=` in every launch file against `setup.py`, by globbing rather than by a
+invisible until someone typed `ros2 launch`, and the overlay code that no arithmetic test can reach — two bugs
+shipped there, a `cos` that was never imported and a text marker placed by the field RViz does not read for text.
+The two newest of those paid for themselves the day they were written: one compares every `executable=` in every launch file against `setup.py`, by globbing rather than by a
 list of names somebody has to remember to extend, and one checks that each ROS-guarded import actually got its
 message types — the only way to notice that a file had asked `sensor_msgs` for `Odometry` and was answered, by
 its own guard, with "no rclpy here. Source a ROS 2 installation" on a machine that had one.
@@ -221,9 +223,15 @@ its own guard, with "no rclpy here. Source a ROS 2 installation" on a machine th
   hall on a typed goal — 0.37 rad off, one turn on the spot, then 0.30 m/s straight at it, re-aiming as the
   odometry slipped — and the three overlays are on the wire: `/move_view` in namespaces `aim`, `goal`, `command`,
   `numbers` in frame `muster/odom`, plus `/wall_view` and `/field_view`.
-* **The view has been seen rendering**: 13 displays over a 30 × 20 m hall, under `Xvfb` with a screenshot, the
-  grid, the robot's trajectory, the lidar, the goal line, the aim line, the command arrow and the phase written
-  over the robot.
+* **The view has been seen rendering**, over `Xvfb` with screenshots of real runs: the grid, the robot's
+  trajectory as a chain of pose arrows, the lidar's wall, the line to the goal, the aim line and the cone of
+  `aim_tolerance` around it.
+* **The text overlay has not been seen rendering on this machine.** It is on the wire — `ros2 topic echo
+  /move_view` shows the `numbers` namespace carrying the phase and the two numbers, and `test_view_overlays.py`
+  asserts the four things a text marker needs in order to appear (text, a pose at the robot, a size in metres, a
+  non-zero alpha) — but on this machine's software-GL RViz the words never came up, while the lines and dots of
+  the same message did. On a machine with a real GPU it is one look: start the control demo and see whether the
+  phase is written over the robot. Which half of this is verified and which is not is the point of the section.
 
 Not working yet, measured on this machine:
 

@@ -26,7 +26,12 @@ overlay (`view:=true`, the default) — the line to the place, the line the nose
 arrow and the phase with its two numbers as text (`view_markers.py`). The other demos are legible from the hall
 window because their subject is the path; this one's subject is the decision two ticks before the path, and a
 straight line and a turn-in-place look the same from outside until you draw what the controller sees.
-`rviz_config:=` takes another config, and `view:=false` leaves the markers unpublished altogether.
+`rviz_config:=` takes another config. The default here is **`drive.rviz`** rather than `explore.rviz`, and the
+difference between the two is the camera and nothing else: text in a marker is metres tall, so the phase and the
+heading error written over the robot are readable at 8 m and gone at the 20 m the frontier run needs, and the two
+cannot be the same shot. `explore.rviz` is that same thirteen displays pulled back to see the hall.
+
+`markers:=false` leaves the overlay unpublished altogether.
 
 Like the rest of the family, no tf tree argument and no lidar no-echo setting: no mapper is in this graph, so
 there is nobody to collide with over `map → <robot>/odom`, and no lidar is read at all — this node steers from
@@ -110,8 +115,9 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="true",
                               description="the view of what the controller is deciding; rviz_config:= for another"),
         DeclareLaunchArgument("rviz_config", default_value=os.path.join(
-            get_package_share_directory("ohm_frontier"), "rviz", "explore.rviz"),
-            description="the one view of this package, with the robot's name written into it"),
+            get_package_share_directory("ohm_frontier"), "rviz", "drive.rviz"),
+            description="the frontier view on a camera close enough to read the phase over the robot; "
+                        "`explore.rviz` is the same thirteen displays at hall distance"),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("goal_topic", default_value="/frontier_goal",
                               description="where a place to drive to comes from; empty for typed commands only"),
