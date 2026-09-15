@@ -58,9 +58,14 @@ brings the mecanum sum back for the comparison.
 
 ## Measuring a demo: path against net
 
-`tools/measure_drive.py <robot> <seconds> <out.csv>` samples the odometry, the `Twist` on `/<robot>/cmd_vel`
-and the lidar's distances in six bearings, and prints the ratio that separates driving from spinning. Run it
-against a live demo. The numbers below are from this machine, headless, in the halls named.
+`tools/try_demo.sh <launch file> <robot> <domain id> [seconds] [world:=hall]` is the whole experiment in one
+command: it starts the stack headless, waits for the hall, samples the odometry, the `Twist` on
+`/<robot>/cmd_vel` and the lidar's distances in six bearings for N seconds, stops the process group, and
+prints what the node said while it was happening. Underneath it is `tools/measure_drive.py <robot> <seconds>
+<out.csv> [clearance]`, which prints the ratio that separates driving from spinning, how far the robot ever
+ got from where it started, the nearest echo and how often anything came inside the clearance margin, and how
+often the commanded turn changed its mind. The numbers below are from this machine, headless, in the halls
+named.
 
 ### Before, measured on the commit that started this round
 
@@ -79,5 +84,22 @@ to go round from a fresh scan every 50 ms, so two comparable walls flipped the a
 
 ### After
 
-Filled in from the four lanes' measurements; each number is a `measure_drive` report quoted in the commit
-that made it.
+Each row is one `try_demo.sh` run, quoted in the commit that made the change it measures.
+
+| demo | hall | path | net | what the run showed |
+| --- | --- | --- | --- | --- |
+| `reactive_wall_follow.launch.py` | `rooms` | 24.01 m | **5.18 m** | acquired the wall, converged onto the gap, and held **0.50 ± 0.10 m for 6.9 s continuously at a mean gap of 0.535 m**; nearest echo 0.26 m, 78 readings inside 0.30 m |
+| `reactive_wall_follow.launch.py` | `maze` | 16.80 m | **6.39 m** | the worst 10 s of the whole run still moved 1.22 m; 31 `blocked ahead` refusals at the corners, and the *left* wall came to 0.17 m, which this rule cannot see because it follows the right one |
+
+**What the wall follower had to be given, in the order it was discovered.** A far echo is not a reference
+(`max_wall_range`), so a wall 5 m off the right is a direction to drive at and the phase says
+`wall in sight, closing on it`. A gap error in metres times a gain is a heading in disguise, so it is now
+explicitly a heading — lean the nose at the gap you want over `aim_lead` metres — and the wall's own angle,
+measured from the two diagonal beams, is what closes that loop. Four 60-to-75-second runs went into the three
+parameters that made it drive rather than wheel; they are each in the parameter comment they cost, in
+[`wall_following.py`](../ohm_frontier/ohm_frontier/wall_following.py), and the short version is on
+[the verification page](verification.md).
+
+`strafe:=true` on any of the three mecanum demos brings the sideways sum back for the comparison; every number
+above was measured without it, and `sideways command: 0.00 m/s at its most, 0 % of samples strafing` is
+printed by the harness so the claim is checkable rather than asserted.

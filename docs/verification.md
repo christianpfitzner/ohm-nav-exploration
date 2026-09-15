@@ -41,15 +41,26 @@ namespaces `aim`, `goal`, `command`, `numbers` in frame `<robot>/odom`, plus `/w
 
 ## The view
 
+* **The numbers over the map are off, and the switch is on the wire.** Seen on a live `explore.launch.py` in
+  `rooms` with a subscriber on `/frontiers`: by default the topic carries three geometry namespaces and no
+  text at all — `{frontiers, selected, approach}` — and after one
+  `ros2 param set /frontier_node show_scores true` the same tick carries `{frontiers, scores, clock}` with the
+  `scores` namespace holding **one TEXT marker per candidate: 21 of them on that map**, which is the cloud of
+  0.30 m words the todo was about. The node answers the switch out loud (`the numbers over the map are on
+  again …`) because a parameter nobody hears being taken is a parameter nobody trusts.
+
+    ros2 topic echo /frontiers --once            # what the view is sent, with the numbers off
+    ros2 param set /frontier_node show_scores true
+
 * **Seen rendering**, over `Xvfb` with screenshots of real runs: the grid, the robot's trajectory as a chain
   of pose arrows, the lidar's wall, the line to the goal, the aim line and the cone of `aim_tolerance` around
   it.
 * **The text overlay has not been seen rendering on this machine.** It is on the wire — `ros2 topic echo
-  /move_view` shows the `numbers` namespace carrying the phase and the two numbers, and `test_view_overlays.py`
-  asserts the four things a text marker needs in order to appear (text, a pose at the robot, a size in metres,
-  a non-zero alpha) — but on this machine's software-GL RViz the words never came up, while the lines and dots
-  of the same message did. On a machine with a real GPU it is one look: start the control demo and see whether
-  the phase is written over the robot.
+  /move_view` shows the `numbers` namespace carrying the phase and the two numbers, and the bullet above puts
+  the frontier labels on the wire too — and `test_view_overlays.py` asserts the four things a text marker needs
+  in order to appear (text, a pose at the robot, a size in metres, a non-zero alpha) — but on this machine's
+  software-GL RViz the words never came up, while the lines and dots of the same message did. On a machine with
+  a real GPU it is one look: start the control demo and see whether the phase is written over the robot.
 
 ## The tests
 
@@ -72,5 +83,5 @@ actually got its message types, which is the only way to notice that a file had 
 `Odometry` and been answered, by its own guard, with "no rclpy here. Source a ROS 2 installation" on a
 machine that had one.
 
-Measured with that: **107 passed**, in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the
+Measured with that: **122 passed**, in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the
 working directory.

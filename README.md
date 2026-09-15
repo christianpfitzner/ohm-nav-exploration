@@ -50,6 +50,17 @@ After the first build, the same line without the build is the whole command:
 source install/setup.bash && ros2 launch ohm_frontier explore.launch.py
 ```
 
+The view shows the ranking as geometry — a dot per candidate, a bigger one on the goal, an arrow to it. The
+arithmetic behind it is one word away, and it is off by default because the text is 0.30 m tall and one
+sentence per candidate (21 of them on a `rooms` map) is a cloud of words over the hall:
+
+```bash
+source install/setup.bash && ros2 launch ohm_frontier explore.launch.py scores:=true
+```
+
+The same thing without restarting anything, which is the version to use while the robot is driving:
+`ros2 param set /frontier_node show_scores true`.
+
 ## The runs worth typing
 
 | command | hall | what it is for |
