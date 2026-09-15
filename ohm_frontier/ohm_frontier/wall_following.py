@@ -79,6 +79,7 @@ APPROACHING = "wall in sight, closing on it"
 FOLLOWING = "following"
 BLOCKED = "blocked ahead"
 NO_WALL = "no wall found — standing still"
+TOO_CLOSE = "the wall is nearer than this robot is wide"
 
 #: what the right hand measured: metres from the kinematic centre, and the wall's own angle relative to the
 #: nose (negative means the wall runs away to the right ahead, so following it means turning right).
@@ -86,10 +87,11 @@ Side = namedtuple("Side", "distance angle")
 
 #: what one cycle decided. `wall` is the measured gap and is None while there is no reference at all; `aim`
 #: is the heading the rule leaned to; `at_gap` says whether the wanted gap has been reached, which is what
-#: separates `converging` from `following` on the screen; and `looking` carries the seconds spent without a
-#: reference into the next cycle so `search_timeout` can fire. A namedtuple rather than a tuple because a
-#: test wants to name these.
-Steering = namedtuple("Steering", "speed turn state wall aim at_gap looking")
+#: separates `converging` from `following` on the screen; `close_guard` says this cycle was inside the floor
+#: under the gap, which is remembered into the next cycle for the same reason the band is; and `looking`
+#: carries the seconds spent without a reference into the next cycle so `search_timeout` can fire. A namedtuple
+#: rather than a tuple because a test wants to name these.
+Steering = namedtuple("Steering", "speed turn state wall aim at_gap looking close_guard", defaults=(False,))
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -158,29 +160,50 @@ def side_of(ranges, angle_increment, range_max, laser_offset_y=0.0, window=2):
 
 
 def steer(ranges, angle_increment, range_max, want=0.50, speed=0.35, find_speed=0.25,
-          max_wall_range=2.0, follow_tolerance=0.10, aim_lead=1.5, turn_gain=1.6, turn_limit=1.1,
+          max_wall_range=2.0, follow_tolerance=0.10, follow_hysteresis=0.05, min_wall_gap=0.30,
+          away_turn=0.5, aim_lead=1.5, max_lean=0.35, turn_gain=1.6, turn_limit=1.1,
           search_turn=0.7, search_timeout=20.0, free_ahead=0.5, laser_offset_y=0.0,
-          looking=0.0, dt=0.05):
+          looking=0.0, at_gap=False, close_guard=False, dt=0.05):
     """The right-hand rule, as metres per second and radians per second.
 
     One heading per cycle, from the two things the right hand knows:
 
         aim  =  the wall's own angle           (turn with the wall, not at it)
-                - atan(gap error / aim_lead)   (and lean towards the gap you want)
+                - lean(gap error)              (and lean towards the gap you want, up to `max_lean`)
         turn =  clamp(turn_gain * aim, ±turn_limit)
 
-    The gap term is a *heading*, bounded by `aim_lead`: however far away the wall is, the most this can ask
-    for is 45° off parallel. That clamp is the whole fix described in the module docstring — the same error
-    in metres, multiplied by a gain in seconds per metre, is what held this robot's `wz` at its limit for
-    45 s while it travelled 45 cm. Leaning 45° at a wall closes the gap at `sin(45°)` of the driving speed,
-    which is the honest pace for a wall whose end the lidar cannot see round, and the lean flattens to 0° —
-    parallel, at full `speed` — as the error closes.
+    That is a feedback law, not a rate command, and the reason it works is that the wall's own angle *is* the
+    robot's heading error: the two diagonal beams measure how far the nose has swung off the wall, so a nose
+    that has rotated as far towards the gap as the error asked for reports an angle that cancels the lean and
+    the turn goes to zero. `aim_lead` sets how steep a lean a given error asks for (1.5 m of lookahead makes
+    a 0.5 m error 18°) and is the reason a far error cannot ask for an infinite rate.
+
+    `max_lean` bounds the ask in the one place the measurement cannot follow, and it is not a small bound in
+    effect: the diagonals sit 45° off the shoulder, so a nose swung 45° at the wall puts the right-behind beam
+    along the wall's own surface, where a real wall ends and the beam stops coming back. Measured with the
+    lean bounded only by `aim_lead`, 60 s in `rooms` from the spawn: **19.08 m of path, 0.64 m of net**, the
+    robot in a circle of 0.23 m radius (`speed` 0.25 m/s over `turn_limit` 1.1 rad/s) and the state line
+    printing `closing on it, leaning -45°` the whole time. The angle it needed to close the loop was the one
+    that had gone blind, and `aim = 0 - 45°` is a constant right turn. So the steepest lean any error can ask
+    for is 20°, which keeps both diagonals on the wall and leaves the loop closed.
 
     `max_wall_range` is the line between a reference and a direction: inside it the measured gap is what the
     rule regulates (`FOLLOWING`), outside it a wall is only somewhere off the right shoulder and the robot
-    closes on it (`APPROACHING`). `follow_tolerance` is what counts as being at the gap: inside it the phase
-    is `following` at `speed`, outside it the screen says `converging` and the speed stays `find_speed`,
-    because a robot still 60 cm off its line has no business driving full pace along it.
+    closes on it (`APPROACHING`).
+
+    `follow_tolerance` and `follow_hysteresis` together decide when the robot may drive at full `speed`, and
+    there are two of them because a band with one edge is a relay. Measured with one edge at 0.10 m: the log
+    changed between `converging` and `following` 19 times in 75 s and the commanded speed with it, which is a
+    rule arguing with itself at 20 Hz — and the `dt` of a limit cycle is exactly the period of the thing it is
+    switching. So the band is entered within `follow_tolerance` and left only beyond it by `follow_hysteresis`,
+    and `at_gap` is the previous cycle's answer coming back in, the same way `looking` is.
+
+    `min_wall_gap` is the floor under the gap, and 0.30 m is not an arbitrary comfort margin: the robot is
+    0.46 m wide, so its flank is 0.23 m from the kinematic centre and a wall at 0.30 m is 7 cm of clearance.
+    Measured without the floor, the same 75 s run recorded **26 readings inside 0.30 m, the nearest 0.24 m** —
+    a wallfollower that reaches its gap by brushing the wall has not followed anything, it has scraped along it.
+    Below the floor the wheels stop and the nose turns off the wall: `TOO_CLOSE` is a decision with a direction,
+    not a freeze, and it is the one state where the aim term is overridden rather than informed.
 
     With nothing on the right at all the robot turns on the spot without driving, because driving forward
     without a reference is how this demo ends against a shelf. After `search_timeout` seconds of that it
@@ -195,8 +218,20 @@ def steer(ranges, angle_increment, range_max, want=0.50, speed=0.35, find_speed=
         return Steering(0.0, -search_turn, SEARCHING, None, -pi / 2, False, spent)
 
     error = side.distance - want
-    at_gap = abs(error) <= follow_tolerance
-    aim = side.angle - atan(clamp(error, -aim_lead, aim_lead) / aim_lead)
+    # two edges, so a gap hovering at the boundary is a robot driving at one speed rather than a relay
+    at_gap = abs(error) <= (follow_tolerance if not at_gap else follow_tolerance + follow_hysteresis)
+
+    if side.distance <= min_wall_gap or (close_guard and side.distance <= min_wall_gap + follow_hysteresis):
+        # The one place the wall's own angle is not allowed to vote. The first version of this branch added
+        # `max_lean` to `side.angle` and called it a turn; in the corner the robot had walked itself into, the
+        # angle was −0.35 rad — the wall falling away ahead, which is the very term that had driven it there —
+        # the two cancelled, `wz` came out at 0.004 rad/s, and the robot sat 0.25 m off the wall for the last
+        # 15 s of a 75 s run with both wheels still. A refusal has to carry a direction, so the rate is fixed
+        # and the angle is ignored until the gap recovers past `min_wall_gap` + `follow_hysteresis`.
+        return Steering(0.0, away_turn, TOO_CLOSE, side.distance, max_lean, False, 0.0, True)
+
+    lean = clamp(atan(error / aim_lead), -max_lean, max_lean)
+    aim = side.angle - lean
     turn = clamp(turn_gain * aim, -turn_limit, turn_limit)
 
     forward = beam(ranges, angle_increment, AHEAD, 3, range_max)
@@ -231,8 +266,27 @@ class WallFollower(Node):
                                           # were a reference is the number that spun this robot for 45 s
             "follow_tolerance": 0.10,     # m of gap error that still counts as being at the gap rather than
                                           # converging on it; also the width of the band drawn blue in RViz
-            "aim_lead": 1.5,              # m of lookahead the gap error is leaned over, and so the steepest
-                                          # approach angle this rule will ever ask for (atan(1) = 45° here)
+            "follow_hysteresis": 0.05,    # m more than `follow_tolerance` before the band is left again. One
+                                          # edge and the log changed between `converging` and `following` 19
+                                          # times in 75 s, the commanded speed with it: a boundary is a relay
+                                          # at 20 Hz, and a relay is how you build a limit cycle you cannot
+                                          # see in a still frame
+            "min_wall_gap": 0.30,         # m, the floor under the gap. The robot is 0.46 m wide, so its flank
+                                          # sits 0.23 m from the centre and this is 7 cm of clearance. Without
+                                          # it the same 75 s run recorded 26 readings inside 0.30 m, the nearest
+                                          # 0.24 m — following a wall by scraping it is not following it
+            "away_turn": 0.5,             # rad/s, the rate the nose turns off the wall while the floor is
+                                          # holding. Fixed rather than computed, because the computed version
+                                          # (the wall's angle plus the full lean) cancelled to 0.004 rad/s in
+                                          # the corner it was invented for and sat there with both wheels still
+            "aim_lead": 1.5,              # m of lookahead the gap error is leaned over: a 0.5 m error is 18°
+            "max_lean": 0.35,             # rad (20°) — the steepest approach this rule will ever ask for. Not
+                                          # a small bound in effect: the diagonals sit 45° off the shoulder, so
+                                          # a nose swung 45° at the wall lays the right-behind beam along the
+                                          # wall's surface, the angle goes blind, and the feedback term of
+                                          # `steer` is replaced by a constant turn at `turn_limit`. Measured
+                                          # without this bound: 19.08 m of path, 0.64 m of net, in a circle of
+                                          # 0.23 m radius, printing `leaning -45°` for 60 s
             "turn_gain": 1.6,             # 1/s of turn per radian of aim error
             "turn_limit": 1.1,            # rad/s — what the demo asks of wheels that could do about 2.6
             "search_turn": 0.7,           # rad/s on the spot while the right hand sees nothing at all
@@ -257,6 +311,9 @@ class WallFollower(Node):
                              find_speed=float(self.get_parameter("find_speed").value),
                              max_wall_range=float(self.get_parameter("max_wall_range").value),
                              follow_tolerance=float(self.get_parameter("follow_tolerance").value),
+                             follow_hysteresis=float(self.get_parameter("follow_hysteresis").value),
+                             min_wall_gap=float(self.get_parameter("min_wall_gap").value),
+                             away_turn=float(self.get_parameter("away_turn").value),
                              aim_lead=float(self.get_parameter("aim_lead").value),
                              turn_gain=float(self.get_parameter("turn_gain").value),
                              turn_limit=float(self.get_parameter("turn_limit").value),
@@ -268,6 +325,8 @@ class WallFollower(Node):
         self.increment = 2 * pi / 360
         self.state = ()                                   # (phase, at_gap) of what was last printed
         self.looking = 0.0                                # seconds without a reference; every one resets it
+        self.at_gap = False                               # which side of the band the last cycle was on
+        self.close_guard = False                          # whether the last cycle was inside the floor
         self.scan_frame = f"{self.robot}/base_link"       # whatever the scan says it is, once one arrives
 
         self.view_pub = None
@@ -335,9 +394,11 @@ class WallFollower(Node):
         if self.scan is None:
             return
         decided = steer(list(self.scan.ranges), self.increment, self.range_max, self.want,
-                        laser_offset_y=self.laser_offset_y, looking=self.looking, dt=self.period,
-                        **self.settings)
+                        laser_offset_y=self.laser_offset_y, looking=self.looking, at_gap=self.at_gap,
+                        close_guard=self.close_guard, dt=self.period, **self.settings)
         self.looking = decided.looking                    # the clock the give-up phase runs on
+        self.at_gap = decided.at_gap                      # and the edge of the band this cycle was on
+        self.close_guard = decided.close_guard             # and whether the floor was holding
         command = Twist()
         command.linear.x, command.angular.z = decided.speed, decided.turn
         self.wheels.publish(command)
@@ -360,6 +421,9 @@ def state_line(decided: Steering, want: float = 0.50) -> str:
         return (f"{NO_WALL} after {decided.looking:.0f} s: nothing at all reflected on the right. This rule "
                 "has no map, so 'drive somewhere else and look again' is another program — try world:=maze, "
                 "or raise max_wall_range if the hall really does have a wall out there")
+    if decided.state == TOO_CLOSE:
+        return (f"{TOO_CLOSE}: {decided.wall:.2f} m — wheels stopped, nose turning off it, because a gap kept "
+                "by brushing the wall is a scrape and not a line")
     if decided.state == SEARCHING:
         return (f"{SEARCHING} — turning right on the spot, nothing reflected after {decided.looking:.0f} s "
                 f"of {decided.speed:.2f} m/s of patience")

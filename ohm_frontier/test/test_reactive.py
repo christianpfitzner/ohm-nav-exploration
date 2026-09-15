@@ -11,7 +11,7 @@ here as a list of 360 numbers, the way `sensors.py` builds one, and the answer i
 The three tests at the end are about the split itself: the modules must still import when ROS is not there,
 because that is what makes the functions above testable at all, and `main` is what has to complain instead.
 """
-from math import inf, nan, pi, radians
+from math import atan, degrees, inf, nan, pi, radians
 from pathlib import Path
 import re
 import sys
@@ -22,7 +22,8 @@ sys.path.insert(0, ".")
 from ohm_frontier import move_to_point, obstacle_avoidance, turn_and_move, view_markers, wall_following   # noqa: E402
 from ohm_frontier.obstacle_avoidance import CLEAR, STOPPED, TURNING, field, nearest_ahead, wrap  # noqa: E402
 from ohm_frontier.turn_and_move import drive_straight, drive_to, parse_command, turn_towards  # noqa: E402
-from ohm_frontier.wall_following import BLOCKED, FOLLOWING, SEARCHING, beam, steer    # noqa: E402
+from ohm_frontier.wall_following import (APPROACHING, BLOCKED, DIAGONAL, FOLLOWING, NO_WALL, SEARCHING,
+                                         TOO_CLOSE, beam, side_of, state_line, steer)                            # noqa: E402
 
 BEAMS, INCREMENT, RANGE_MAX = 360, 2 * pi / 360, 8.0        # what `sensors.py` actually publishes
 
@@ -54,17 +55,21 @@ PACKAGE = Path(__file__).resolve().parents[1]      # where setup.py and launch/ 
 
 
 def test_a_wall_closer_than_the_wanted_gap_is_answered_by_turning_away_from_it():
-    """The proportional term of `steer`, in the direction a person standing beside the robot expects."""
-    decided = steer(a_scan([(-90, 0.25)]), INCREMENT, RANGE_MAX)
-    assert decided.state == FOLLOWING and decided.wall == pytest.approx(0.25)
-    assert decided.turn > 0, "a wall at 25 cm where 40 cm was wanted must turn left, away from it"
+    """The gap term of `steer`, in the direction a person standing beside the robot expects.
+
+    At 0.35 m rather than the 0.25 m this test used to use: below `min_wall_gap` a different rule answers, and
+    that one has its own test below.
+    """
+    decided = steer(a_scan([(-90, 0.35)]), INCREMENT, RANGE_MAX)
+    assert decided.state == FOLLOWING and decided.wall == pytest.approx(0.35)
+    assert decided.turn > 0, "a wall at 35 cm where 50 cm was wanted must turn left, away from it"
     assert decided.speed > 0, "the rule follows a wall it has, it does not stop for it"
 
 
 def test_a_wall_farther_than_the_wanted_gap_is_answered_by_turning_towards_it():
     decided = steer(a_scan([(-90, 0.90)]), INCREMENT, RANGE_MAX)
     assert decided.state == FOLLOWING
-    assert decided.turn < 0, "90 cm of gap where 40 cm was wanted must turn right, back towards the wall"
+    assert decided.turn < 0, "90 cm of gap where 50 cm was wanted must turn right, back towards the wall"
 
 
 def test_nothing_on_the_right_stops_the_robot_and_turns_until_a_wall_comes_back():
@@ -75,9 +80,13 @@ def test_nothing_on_the_right_stops_the_robot_and_turns_until_a_wall_comes_back(
 
 
 def test_the_right_hand_is_the_half_of_the_scan_with_the_negative_angles():
-    """A wall on the left must not be mistaken for a wall on the right — the classic off-by-half-circle."""
+    """A wall on the left must not be mistaken for a wall on the right — the classic off-by-half-circle.
+
+    0.40 m on the right, not the 0.30 m this used to use: the floor under the gap now answers anything nearer,
+    and this test is about which half of the scan is the right hand.
+    """
     assert steer(a_scan([(90, 0.30)]), INCREMENT, RANGE_MAX).state == SEARCHING
-    assert steer(a_scan([(-90, 0.30)]), INCREMENT, RANGE_MAX).state == FOLLOWING
+    assert steer(a_scan([(-90, 0.40)]), INCREMENT, RANGE_MAX).state == FOLLOWING
 
 
 def test_a_missing_echo_is_not_a_wall_at_the_far_end_of_the_lidar():
@@ -99,6 +108,177 @@ def test_a_wall_straight_ahead_brakes_without_losing_the_wall_on_the_right():
     decided = steer(a_scan([(0, 0.30), (-90, 0.40)]), INCREMENT, RANGE_MAX)
     assert decided.state == BLOCKED and decided.speed == 0.0
     assert decided.wall == pytest.approx(0.40), "the reference on the right is still what it is following"
+
+
+def test_a_wall_beyond_the_range_is_a_direction_to_drive_to_and_not_a_gap_to_keep():
+    """The measured bug: **17.15 m of path and 0.45 m of net** in 45 s, `wz` at its clamp the whole time, and
+    the state line printing `following: wall 3.93 m`. A wall 3.93 m off is not a reference at 0.50 m; it is
+    somewhere off the right shoulder, and the answer is to drive towards it at walking pace.
+    """
+    decided = steer(a_scan([(-90, 3.93)]), INCREMENT, RANGE_MAX)
+    assert decided.state == APPROACHING, "a wall outside max_wall_range is being followed, which is the bug"
+    assert decided.wall == pytest.approx(3.93)
+    assert 0 < decided.speed < 0.35, "closing on a wall whose end the lidar cannot see round is find_speed"
+    assert decided.turn < 0, "and it leans towards the wall while it closes"
+
+
+def test_the_gap_error_becomes_an_angle_which_a_far_wall_cannot_saturate():
+    """Metres times a gain clamps and stays clamped; metres leaned over a lookahead settle.
+
+    Three numbers, three reasons. Half a metre of error asks for atan(0.5/1.5) = 18°. A wall 6 m out and a
+    wall 7 m out ask for the same 20°, because past `max_lean` there is nothing left to ask for — and 20° is
+    the largest lean that keeps both diagonal beams on the wall, which is the measurement the loop closes on.
+    The turn that results, 1.6 × 0.35 = 0.56 rad/s, is inside `turn_limit`: an error this large is the case
+    that used to hold `wz` at its clamp for 45 s, so the bound has to bite before the wheels do.
+    """
+    half_a_metre_out = steer(a_scan([(-90, 1.00)]), INCREMENT, RANGE_MAX)
+    far, further = steer(a_scan([(-90, 7.00)]), INCREMENT, RANGE_MAX), \
+        steer(a_scan([(-90, 6.50)]), INCREMENT, RANGE_MAX)
+    assert degrees(half_a_metre_out.aim) == pytest.approx(-degrees(atan(0.5 / 1.5)), abs=0.6)
+    assert degrees(far.aim) == pytest.approx(-degrees(0.35), abs=0.6), "the lean is bounded by max_lean"
+    assert far.aim == pytest.approx(further.aim), "two errors past the bound ask for one heading"
+    assert abs(far.turn) < 1.1, "the largest ask is inside the wheel limit, so the robot still translates"
+
+
+def test_the_lean_is_bounded_where_the_measurement_that_closes_the_loop_survives():
+    """`max_lean` is not a comfort limit. At 45° of nose-swing the right-behind beam lies along the wall's own
+    surface, the two-diagonal angle goes blind, `side_of` falls back to parallel and `aim` degenerates to a
+    constant turn — which is how a robot ends up in a 0.23 m circle printing `leaning -45°` for a minute.
+    At 20° the beam is 25° off the surface, the angle is still measured, the loop is still closed.
+    """
+    seen_at_the_full_lean = a_scan([(-90, 2.00), (-45, 1.60), (-135, 2.45)])
+    assert side_of(seen_at_the_full_lean, INCREMENT, RANGE_MAX).angle != 0.0, \
+        "a wall seen at the full lean still reports its angle, which is the whole feedback path"
+    rooms_spawn = steer(a_scan([(-90, 5.23)]), INCREMENT, RANGE_MAX)
+    assert degrees(rooms_spawn.aim) > -21, "the 5.23 m wall at the rooms spawn is what the bound was fitted to"
+    assert rooms_spawn.speed > 0, "and it is still driven towards, at the lean rather than at a pivot"
+
+
+def test_the_gap_band_has_two_edges_because_one_edge_is_a_relay():
+    """`at_gap` comes back in from the previous cycle, the way `looking` does.
+
+    With one edge the 75 s run printed `converging` and `following` 19 times apiece, the commanded speed
+    swinging between 0.25 and 0.35 with them: a boundary the robot sits on is a switch, and a switch at 20 Hz
+    is a limit cycle that nobody can see in a still frame.
+    """
+    scan = a_scan([(-90, 0.63)])                      # 0.13 m of error: outside the band, inside the hysteresis
+    arrived = steer(scan, INCREMENT, RANGE_MAX, at_gap=False)
+    holding = steer(scan, INCREMENT, RANGE_MAX, at_gap=True)
+    assert not arrived.at_gap and arrived.speed == pytest.approx(0.25)
+    assert holding.at_gap and holding.speed == pytest.approx(0.35), "the same gap, and the last cycle decides"
+
+
+def test_a_wall_nearer_than_the_robot_is_wide_stops_the_wheels_and_turns_off_it():
+    """0.30 m is not comfort margin: the robot is 0.46 m wide, so its flank sits 0.23 m from the centre, and
+    the run without this floor recorded 26 readings inside 0.30 m, the nearest 0.24 m. The error term is
+    overridden here — the one state where it does not get to vote, because driving along a wall you are
+    touching is not following it.
+    """
+    decided = steer(a_scan([(-90, 0.24)]), INCREMENT, RANGE_MAX)
+    assert decided.state == TOO_CLOSE and decided.speed == 0.0
+    assert decided.turn == pytest.approx(0.5), "a fixed rate off the wall, not a term that can cancel itself"
+    assert decided.close_guard and "scrape" in state_line(decided), state_line(decided)
+
+
+def test_the_floor_keeps_holding_while_the_wall_is_still_too_near_to_leave():
+    """The same two-edge band on the way out of the guard, and the same reason: at one edge the robot sits on
+    the boundary and the log alternates. 0.33 m is above the 0.30 m floor and below the 0.35 m release.
+    """
+    scan = a_scan([(-90, 0.33)])
+    assert steer(scan, INCREMENT, RANGE_MAX, close_guard=True).state == TOO_CLOSE
+    assert steer(scan, INCREMENT, RANGE_MAX, close_guard=False).state == FOLLOWING
+
+
+def test_the_guard_turns_off_the_wall_even_when_the_wall_is_the_reason_it_is_there():
+    """The corner that the first version of the guard died in: a wall falling away ahead, which the
+    follow-the-wall term reads as −0.35 rad — the very steer that walked the robot into it. Add the full lean
+    to that and the two cancel, which is how a robot ends a 75 s run sitting 0.25 m from a corner with both
+    wheels still. Here the angle is ignored and the nose comes off at the fixed rate.
+    """
+    into_the_corner = a_scan([(-90, 0.25), (-45, 0.55), (-135, 0.20)])
+    assert side_of(into_the_corner, INCREMENT, RANGE_MAX).angle < -0.3, "the geometry that cancelled the turn"
+    decided = steer(into_the_corner, INCREMENT, RANGE_MAX)
+    assert decided.state == TOO_CLOSE and decided.turn == pytest.approx(0.5)
+    assert degrees(decided.aim) > 0, "the overlay still points off the wall, because that is what it is doing"
+
+
+def test_being_at_the_gap_and_still_converging_onto_it_are_two_answers():
+    """`follow_tolerance` is what separates the phase on the screen and the pace of the wheels: a robot still
+    25 cm off its line has no business driving along it at full speed.
+    """
+    at_it = steer(a_scan([(-90, 0.55)]), INCREMENT, RANGE_MAX)
+    still_off = steer(a_scan([(-90, 0.75)]), INCREMENT, RANGE_MAX)
+    assert at_it.at_gap and at_it.state == FOLLOWING and at_it.speed == pytest.approx(0.35)
+    assert not still_off.at_gap and still_off.speed == pytest.approx(0.25)
+    assert state_line(still_off, 0.50).startswith("converging"), state_line(still_off, 0.50)
+
+
+def test_the_gap_is_measured_from_the_point_the_wheels_turn_about():
+    """The same wall in the same place is a different error to a sensor that is not at the centre. The
+    simulator mounts the lidar at [0, 0, 0], which is why `laser_offset_y` is 0.0 and why nothing in this
+    repo noticed the difference until a robot with a nose-mounted lidar arrived.
+    """
+    scan = a_scan([(-90, 0.50)])
+    centred = steer(scan, INCREMENT, RANGE_MAX)
+    assert centred.wall == pytest.approx(0.50) and centred.turn == pytest.approx(0.0, abs=0.01)
+    sensor_7_cm_left = steer(scan, INCREMENT, RANGE_MAX, laser_offset_y=0.07)
+    assert sensor_7_cm_left.wall == pytest.approx(0.43)
+    assert sensor_7_cm_left.turn > 0, (
+        "the same wall in the same place is now too close, and the robot steers away from it — 7 cm of mount "
+        "error is most of `follow_tolerance`, so it is not nothing")
+
+
+def test_the_two_diagonal_beams_are_the_walls_own_angle():
+    """A wall that falls away to the right ahead is a corridor bending right, not a nearer wall: the robot
+    turns with it, harder than the gap alone would ask.
+    """
+    bending = a_scan([(-90, 0.60), (-45, 1.20), (-135, 0.60)])
+    parallel = a_scan([(-90, 0.60), (-45, 0.60), (-135, 0.60)])
+    assert side_of(bending, INCREMENT, RANGE_MAX).angle < 0, "falling away ahead is a right turn, which is negative"
+    assert steer(bending, INCREMENT, RANGE_MAX).turn < steer(parallel, INCREMENT, RANGE_MAX).turn, \
+        "the same gap in the same place, and the bend is what the nose is for"
+
+
+def test_the_side_beam_can_be_blind_and_the_two_diagonals_still_answer_for_the_gap():
+    """Two points 45° off the shoulder are a line: each is 0.707 of its slant range to the side, so the gap
+    at the flank is the mean of them. A post between the robot and the wall costs the reference nothing.
+    """
+    side = side_of(a_scan([(-45, 0.80), (-135, 0.80)]), INCREMENT, RANGE_MAX)
+    assert side.distance == pytest.approx(0.80 * DIAGONAL)
+    assert steer(a_scan([(-45, 0.80), (-135, 0.80)]), INCREMENT, RANGE_MAX).state == FOLLOWING
+
+
+def test_one_diagonal_blind_leaves_a_gap_and_no_opinion_about_the_walls_bearing():
+    """One point is not a line. The reference is kept — a wall is a wall — but the angle term goes to zero
+    rather than guessing, which is the difference between following a wall and inventing one.
+    """
+    side = side_of(a_scan([(-90, 0.60), (-45, 0.90)]), INCREMENT, RANGE_MAX)
+    assert side.angle == 0.0 and side.distance == pytest.approx(0.60)
+    assert steer(a_scan([(-90, 0.60), (-45, 0.90)]), INCREMENT, RANGE_MAX).state == FOLLOWING
+
+
+def test_the_search_is_counted_across_cycles_and_then_said_out_loud():
+    """`looking` is how cycle 401 knows how long it has been blind: the node hands it back what it measured.
+    Turning for ever beside an open hall is the old behaviour; after `search_timeout` it stops and says what
+    it cannot do, because this rule has no map to go and look somewhere else with.
+    """
+    blind = a_scan()
+    first = steer(blind, INCREMENT, RANGE_MAX, looking=0.0, dt=0.05)
+    assert first.state == SEARCHING and first.looking == pytest.approx(0.05)
+    assert first.speed == 0.0 and first.turn < 0, "spin towards the wall you want, do not drive blind"
+    given_up = steer(blind, INCREMENT, RANGE_MAX, looking=19.99, dt=0.05)
+    assert given_up.state == NO_WALL and (given_up.speed, given_up.turn) == (0.0, 0.0)
+    assert "max_wall_range" in state_line(given_up), "a stop has to come with the next thing to try"
+
+
+def test_the_lidars_own_maximum_is_no_wall_once_a_range_is_named():
+    """`beam` on its own reports what came back, which for the simulator's own dialect of 'nothing' is its
+    maximum range — 8.0 m of wall, which no rule is allowed to read. Naming `range_max` is what turns that
+    reading back into an absence; the rule-level version of this is the dialect test above.
+    """
+    ranges = a_scan(no_echo="range")
+    assert beam(ranges, INCREMENT, -pi / 2, 2) == pytest.approx(RANGE_MAX)
+    assert beam(ranges, INCREMENT, -pi / 2, 2, RANGE_MAX) is None
 
 
 # ------------------------------------------------------------------------------- the vector field

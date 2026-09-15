@@ -68,6 +68,11 @@ def generate_launch_description():
         DeclareLaunchArgument("laser_offset_y", default_value="0.0",
                               description="m the lidar sits left of the kinematic centre; the simulator "
                                           "mounts it at [0,0,0], so 0 unless your robot carries it elsewhere"),
+        DeclareLaunchArgument("min_wall_gap", default_value="0.30",
+                              description="m, the floor under the gap. The robot is 0.46 m wide, so this is "
+                                          "7 cm of clearance; nearer than this the wheels stop and the nose "
+                                          "turns off the wall, because a gap kept by scraping the wall is a "
+                                          "scrape"),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([sim_dir(), "launch", "lab.launch.py"])),
@@ -86,6 +91,7 @@ def generate_launch_description():
                 "speed": ParameterValue(LaunchConfiguration("speed"), value_type=float),
                 "find_speed": ParameterValue(LaunchConfiguration("find_speed"), value_type=float),
                 "max_wall_range": ParameterValue(LaunchConfiguration("max_wall_range"), value_type=float),
+                "min_wall_gap": ParameterValue(LaunchConfiguration("min_wall_gap"), value_type=float),
                 "laser_offset_y": ParameterValue(LaunchConfiguration("laser_offset_y"), value_type=float),
             }],
         ),
