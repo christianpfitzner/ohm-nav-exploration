@@ -143,10 +143,11 @@ node that does not handle this asks for the impossible forever. Four things are 
   `progress_distance` (0.25 m) nearer to it within `goal_timeout_s` (10 s). Ten seconds is what a robot that
   will never move costs this node: the driving can be disconnected in a way that leaves the map, the plan and
   the view all perfect — this hall has done it, with nav2's commands on the wire as a `TwistStamped` in front
-  of a simulator that listens for a `Twist` (the fourth pit in the README) — and ten seconds without
-  approaching is also what a frontier on the far side of a wall looks like from here. It is deliberately not a
-  deadline for the whole drive: a frontier at the end of a
-  hall is perfectly reachable and takes far longer, and what restarts the clock is any approach of
+  of a simulator that listens for a `Twist` ([the trap, and the measurements that found
+  it](troubleshooting.md#the-robot-does-not-move-and-the-view-is-right--check-the-command-chain)) — and ten
+  seconds without approaching is also what a frontier on the far side of a wall looks like from here. It is
+  deliberately not a deadline for the whole drive: a frontier at the end of a hall is perfectly reachable and
+  takes far longer, and what restarts the clock is any approach of
   `progress_distance` past the nearest gap so far. The version before this one had `stall_s` (25 s) and
   `patience_s` (120 s), two calendar deadlines, which between them amounted to blacklisting a whole hall
   inside two minutes; both parameters are gone.
@@ -196,8 +197,8 @@ run is what an "exploration finished" screen looks like when nobody has thought 
 
 ## Every parameter the node declares
 
-Defaults as declared in [`frontier_node.py`](../ohm_frontier/ohm_frontier/frontier_node.py). The four that
-change behaviour most are also in the README.
+Defaults as declared in [`frontier_node.py`](../ohm_frontier/ohm_frontier/frontier_node.py). The four the
+quick start names are in this list too; this is the whole of it.
 
 | parameter | default | what it is for |
 | --- | --- | --- |

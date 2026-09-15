@@ -21,7 +21,8 @@ What to watch: the list of frontiers in RViz, one clump per room, and which arro
 arrows disappearing one at a time — `reached (10.51, 12.33)`, `reached (12.21, 11.33)`, five of them inside
 two minutes headless on this machine — with the map filling in behind the robot. If the arrows change while
 the robot stands still, the driving is not connected rather than the ranking being wrong: the fourth pit in
-the README is that, and it looks like a controller that never commands anything.
+the README is that, and it looks like a controller that never commands anything: the first section of
+`docs/troubleshooting.md` is the checklist for it.
 """
 import os
 
