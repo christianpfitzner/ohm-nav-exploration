@@ -336,6 +336,33 @@ def test_the_frontier_launch_file_starts_one_node_alone(monkeypatch):
         "this one is for a run where the rest is already up"
 
 
+def test_the_view_is_decided_before_the_simulator_is_allowed_to_answer_for_its_name(monkeypatch):
+    """An included launch file writes its arguments into the including file's configuration space.
+
+    Measured, not assumed: a file that declares `rviz` with default `true`, includes `lab.launch.py` with
+    `rviz:=false` and then reads `rviz` back, reads `false` — and reads `robots` as empty although nobody ever
+    mentioned it. The simulator declares nineteen arguments, so any name this file also uses and reads after
+    the include belongs to the simulator by then. `rviz` is the one the whole view decision is made of, so the
+    reading happens in an entity placed before the include; that ordering is the bug and this test is the
+    reason it stays fixed, because the failure it prevents is a launch that starts no viewer and prints nothing.
+    """
+    for name in ("explore.launch.py", "move_to_point.launch.py"):
+        module = launch_file(name, monkeypatch, installed=tuple(SHARES))
+        seen = {}
+        for position, entity in enumerate(module.generate_launch_description().entities):
+            if isinstance(entity, IncludeLaunchDescription):
+                seen.setdefault("simulator", position)
+            elif "view" in getattr(getattr(entity, "_OpaqueFunction__function", None), "__name__", ""):
+                # launch keeps an OpaqueFunction's callable behind a name-mangled private attribute, and a
+                # launch file has several of them — the parameter files and the view are both built late — so
+                # the one that draws the picture is identified by the name it was given.
+                seen.setdefault("view", position)
+        assert {"simulator", "view"} <= set(seen), f"{name} starts neither: {seen}"
+        assert seen["view"] < seen["simulator"], \
+            f"{name}: the view is decided at {seen['view']} but the simulator is performed at " \
+            f"{seen['simulator']}, so `rviz` is the simulator's answer by then"
+
+
 def test_the_view_is_yaml_and_shows_the_four_things_a_run_has_to_show():
     """The map, where the robot has been, every frontier there is, and the one it chose. A display class
     spelled wrong loses one of those four and says nothing while it is missing."""

@@ -27,5 +27,6 @@ setup(
         "wall_following = ohm_frontier.wall_following:main",
         "obstacle_avoidance = ohm_frontier.obstacle_avoidance:main",
         "turn_and_move = ohm_frontier.turn_and_move:main",
+        "move_to_point = ohm_frontier.move_to_point:main",
     ]},
 )

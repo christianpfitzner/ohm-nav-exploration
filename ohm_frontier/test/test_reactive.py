@@ -19,7 +19,7 @@ import sys
 import pytest
 
 sys.path.insert(0, ".")
-from ohm_frontier import obstacle_avoidance, turn_and_move, wall_following            # noqa: E402
+from ohm_frontier import move_to_point, obstacle_avoidance, turn_and_move, view_markers, wall_following   # noqa: E402
 from ohm_frontier.obstacle_avoidance import CLEAR, STOPPED, TURNING, field, nearest_ahead, wrap  # noqa: E402
 from ohm_frontier.turn_and_move import drive_straight, drive_to, parse_command, turn_towards  # noqa: E402
 from ohm_frontier.wall_following import BLOCKED, FOLLOWING, SEARCHING, beam, steer    # noqa: E402
@@ -246,17 +246,23 @@ def test_the_heading_integral_cannot_grow_while_a_robot_is_held_against_a_wall()
 # ------------------------------------------------------------------------------- the split itself
 
 
-def test_the_maths_of_all_three_modules_imports_without_ros(monkeypatch):
+def test_the_maths_of_every_reactive_module_imports_without_ros(monkeypatch):
     """`test_reactive.py` is the reason for the guarded imports, so the guard is checked, not assumed.
 
     With the ROS modules unavailable, the files must still import — that is what `field` and `steer` being
     plain functions is for — and it has to be `main` that refuses, in words that say what to source.
+
+    `move_to_point.py` is in this list because it wants the same property, and the two message modules added
+    below are in it because its overlay imports and `view_markers`' are the newest guarded ones in the
+    package: a marker type imported outside a `try` would break the one thing this file is for.
     """
     from importlib import reload
 
-    modules = (wall_following, obstacle_avoidance, turn_and_move)
+    modules = (wall_following, obstacle_avoidance, turn_and_move, move_to_point)
     for name in ("rclpy", "rclpy.node", "rclpy.action", "geometry_msgs", "geometry_msgs.msg",
-                 "sensor_msgs", "sensor_msgs.msg", "nav_msgs", "nav_msgs.msg", "std_msgs", "std_msgs.msg"):
+                 "sensor_msgs", "sensor_msgs.msg", "nav_msgs", "nav_msgs.msg", "std_msgs", "std_msgs.msg",
+                 "visualization_msgs", "visualization_msgs.msg", "builtin_interfaces",
+                 "builtin_interfaces.msg"):
         monkeypatch.setitem(sys.modules, name, None)            # `import x` on a None entry raises
 
     for module in modules:
@@ -274,13 +280,48 @@ def test_the_maths_of_all_three_modules_imports_without_ros(monkeypatch):
         reload(module)
 
 
-def test_every_executable_a_reactive_launch_file_starts_is_installed_by_setup_py():
-    """`Node(package=..., executable=...)` is a string: a missing console_script is a launch-time error and
-    the kind of typo that no import catches, so the two lists are compared here."""
-    installed = set(re.findall(r"([\w-]+)\s*=\s*ohm_frontier\.\w+:main", (PACKAGE / "setup.py").read_text()))
-    assert {"frontier_node", "wall_following", "obstacle_avoidance", "turn_and_move"} <= installed, installed
+def test_with_ros_present_the_guard_imports_every_message_name_it_uses():
+    """The mirror image of the test above, and the one that has earned its keep once already.
 
-    for name in ("reactive_wall_follow.launch.py", "reactive_avoid.launch.py",
-                 "reactive_turn_and_move.launch.py"):
-        started = set(re.findall(r'executable="([\w-]+)"', (PACKAGE / "launch" / name).read_text()))
-        assert started and started <= installed, f"{name} starts {started - installed}"
+    A guarded import that puts a whole block under one `except ImportError:` cannot tell "this machine has no
+    ROS" from "this file asked for a message that is not where it said" — and answers both with the same hint
+    about sourcing a setup file. `move_to_point.py` did exactly that for a day: it wanted `Odometry` from
+    `nav_msgs` and asked `sensor_msgs` for it, and the guard told the author to install ROS on a machine that
+    had it. So on a machine that does have ROS, every name behind every guard in the package must be a class.
+    """
+    names = {wall_following: ("Twist", "LaserScan", "MarkerArray"),
+             obstacle_avoidance: ("Twist", "LaserScan", "MarkerArray"),
+             turn_and_move: ("Twist", "PoseStamped", "Odometry", "String"),
+             move_to_point: ("Twist", "PoseStamped", "Odometry", "String", "MarkerArray"),
+             view_markers: ("Marker", "MarkerArray", "Point", "Duration")}
+    for module, given in names.items():
+        missing = [name for name in given if getattr(module, name, None) is None]
+        assert not missing, f"{module.__name__} has {missing} as None: either this machine has no ROS, or the " \
+                            "name is on the wrong module and the guard has hidden that"
+    assert hasattr(turn_and_move, "Node") and turn_and_move.Node is not object, \
+        "`Node = object` in a guard means the same lie about rclpy"
+    assert view_markers.available(), "the guards are fine but the overlay says it is not there anyway"
+
+
+def test_every_executable_a_launch_file_starts_is_installed_and_every_one_installed_is_launched():
+    """`Node(package=..., executable=...)` is a string: a missing console_script is a launch-time error and
+    the kind of typo that no import catches, so the two lists are compared here.
+
+    Compared by walking `launch/*.py` rather than a list of file names written here, because the list was the
+    weak part: a new launch file simply was not checked, and the one failure mode of this test is exactly a
+    file nobody thought to add. Checked both ways for the same reason — an entry point no launch file starts
+    is an executable that is installed, documented and never run, which is how a demo rots.
+    """
+    installed = set(re.findall(r"([\w-]+)\s*=\s*ohm_frontier\.\w+:main", (PACKAGE / "setup.py").read_text()))
+    assert {"frontier_node", "wall_following", "obstacle_avoidance", "turn_and_move",
+            "move_to_point"} <= installed, installed
+
+    # `package=` and `executable=` are adjacent in every launch file of this package, which is what lets one
+    # regex ask "which executables of *this* package" without dragging in the nav2 and slam_toolbox ones.
+    starts = re.compile(r'package="ohm_frontier",\s*\n?\s*executable="([\w-]+)"')
+    launched = set()
+    for launch in sorted((PACKAGE / "launch").glob("*.py")):
+        started = set(starts.findall(launch.read_text()))
+        launched |= started
+        assert started <= installed, f"{launch.name} starts {started - installed}, which setup.py does not build"
+    assert launched == installed, f"installed but launched by nothing: {installed - launched}"

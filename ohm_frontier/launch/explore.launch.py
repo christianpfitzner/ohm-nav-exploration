@@ -151,7 +151,16 @@ def generate_launch_description():
     view = OpaqueFunction(function=started_by_view, args=[LaunchConfiguration("rviz"),
                                                           LaunchConfiguration("rviz_config"), sim_time])
 
-    return LaunchDescription(arguments + [simulator, named, view, frontiers_node])
+    # First among the entities, and the position is a correctness matter, not a preference: an included launch
+    # file writes the arguments it declares into *this* file's configuration space, so after the simulator is
+    # performed, `rviz` reads back as the `false` this file passed *to it* rather than the `true` somebody
+    # typed or the default declared above. Measured with a three-entity launch file: `true` before the include,
+    # `false` after — and the same for `robots`, which was never mentioned at all. The simulator declares 19
+    # arguments (`BASICS` in `mecanum-lab/launch/lab.launch.py`), five of which this file also uses; of those,
+    # `world`, `robot`, `headless` and `use_sim_time` mean the same thing to both, and `rviz` does not — it is
+    # the lab's Pygame-adjacent viewer and our RViz, and the one this decision is made of. Read early, the
+    # default-on view is on; read late, and `rviz:=true` starts nothing and says nothing.
+    return LaunchDescription(arguments + [view, simulator, named, frontiers_node])
 
 
 def started_by_name(context, *args, **kwargs):
