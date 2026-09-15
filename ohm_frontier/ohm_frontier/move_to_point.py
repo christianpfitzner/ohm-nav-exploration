@@ -8,9 +8,10 @@ The fourth control example in the reactive family, and the one that answers the 
 the first two: *why* does `turn_and_move.drive_to` turn and drive at the same time, instead of doing the
 obvious thing — aim first, then go? This file does the obvious thing, so the two can be started in two
 terminals on the same hall with the same goal and compared. `orient_then_drive` has two phases and one rule
-each: turn while the place is outside `aim_tolerance` of the nose, drive while it is inside. Nothing is mixed,
-so nothing here needs a stability argument — and that is exactly what makes the comparison worth an hour,
-because the simultaneous controller is the one that has to be tuned.
+each: turn while the place is outside `aim_tolerance` of the nose, drive while it is inside — except inside
+`aim_commit` metres, where the cone is no longer asked because there it costs more than it can pay. Nothing is
+mixed, so nothing here needs a stability argument — and that is exactly what makes the comparison worth an
+hour, because the simultaneous controller is the one that has to be tuned.
 
 What to watch, in the order it happens:
 
@@ -18,15 +19,30 @@ What to watch, in the order it happens:
   mecanum base it is a choice rather than a necessity — the same robot can strafe to the same place without
   rotating at all, which is what `turn_and_move.drive_straight`'s `cross_track` term does. Ask the room which
   of the two arrives first, then run both.
-* **It re-aims.** Driving is dead straight: `turn` is zero, nothing corrects the line. So the moment the place
-  drifts outside the tolerance cone — because the robot slid, because the odometry integrated metres it never
-  drove (`robot.slip` = 1.0 in `mecanum_lab/physics.py`) — the phase falls back to `orienting`, and the robot
-  stops to look at the goal again. Stop-and-go along a straight line is the signature of a sequential
-  controller; the simultaneous one never stops, and never stops *for a reason* either.
-* **The tolerance is the accuracy.** `aim_tolerance` 0.08 rad is 4.6°; at a goal 3 m away that allows 24 cm of
-  sideways error before this controller notices, which you can compute before the robot moves. Then start it
-  with `aim_tolerance:=0.25` and watch it arrive half a metre wide and still report `arrived`. No other
-  parameter in this package is so cheap to demonstrate.
+* **It re-aims, and near home that used to be the end of it.** Driving is dead straight: `turn` is zero,
+  nothing corrects the line. So the moment the place drifts outside the tolerance cone — because the robot
+  slid, because the odometry integrated metres it never drove (`robot.slip` = 1.0 in
+  `mecanum_lab/physics.py`) — the phase falls back to `orienting`, and the robot stops to look at the goal
+  again. Stop-and-go along a straight line is the signature of a sequential controller; the simultaneous one
+  never stops, and never stops *for a reason* either.
+
+  Re-aiming is cheap 4 m out and ruinous 40 cm out, and the reason is a pair of rates, not a mistake. Driving
+  straight grows the heading error at `speed · sin(error) / remaining`; the orient phase shrinks it at
+  `gain_turn · error`, which at the edge of a 0.08 rad cone is only 1.8 × 0.08 = **0.144 rad/s** — while the
+  bearing to a place 0.3 m away swings at 0.3 × 0.08 / 0.3 = 0.08 rad/s. Two rates within a factor of two of
+  each other, so neither wins and the phase test decides five times a second. Measured over a 6.0 m run in
+  `open`, before this file had a commit distance: 36 changes of phase in 25 s of driving, 9 of them in the
+  last 1.7 s, **16 % of the final 10 s spent turning on the spot with no forward drive, and the run ended
+  0.187 m from the place — outside its own 0.12 m arrival tolerance — still printing `orienting`.** It was
+  not stuck and it had not hit anything (nearest echo 1.70 m); it was arguing with itself about a cone that
+  was 0.01 m of lateral error wide at that range.
+* **The tolerance is the accuracy, up to the commit.** `aim_tolerance` 0.08 rad is 4.6°; at a goal 3 m away
+  that allows 24 cm of sideways error before this controller notices, which you can compute before the robot
+  moves. Then start it with `aim_tolerance:=0.25` and watch it arrive wide and still report `arrived`. What
+  decides the finish is not the cone but `aim_commit · sin(aim_tolerance)` = 0.062 m at that setting, which is
+  why a wide cone still arrives; push the tolerance to 0.5 rad and that product is 0.12 m, the whole arrival
+  tolerance, and it stops being the same controller. No other parameter in this package is so cheap to
+  demonstrate.
 * **Whose odometry is this?** Nothing in this graph authenticates a topic. The first 58 s run of this file
   produced 32 phase changes and a heading error that jumped between two values a metre of robot motion apart —
   which is not a controller misbehaving, it is a second simulator from somebody else's session, still alive and
@@ -96,7 +112,7 @@ COMMAND_SCALE = 2.0
 
 
 def orient_then_drive(pose, goal, gain_turn=1.8, turn_limit=1.2, speed=0.3, decelerate_over=0.25,
-                      aim_tolerance=0.08, arrive_distance=0.12) -> Motion:
+                      aim_tolerance=0.08, arrive_distance=0.12, aim_commit=0.25) -> Motion:
     """The two-phase controller: face the place, then drive at it. One rule is in charge per cycle.
 
     `pose` is `(x, y, heading)` as the odometry reports it, `goal` is `(x, y)`, both in the same frame — see
@@ -121,18 +137,35 @@ def orient_then_drive(pose, goal, gain_turn=1.8, turn_limit=1.2, speed=0.3, dece
     worth writing down: **`decelerate_over` must exceed `arrive_distance`**, or the last stretch is driven at
     full speed and reported as a stop.
 
-    **One cone, and the second one was measured away.** The obvious next parameter is hysteresis — enter
-    `driving` at `aim_tolerance` but leave it only at a wider one, which is what a switch with a dead band does
-    and what any textbook would ask for here. It was implemented, and measured on identical runs across the
-    empty hall with the band closed and open: 9 changes of phase per minute against 12, both with a couple of
-    changes inside 100 ms of one another. That is no difference, on a controller that re-aims roughly every six
-    seconds of driving and re-aims *because it should* — the odometry slips, the bearing to the place moves, and
-    noticing that is the whole behaviour. So the file has one cone again: a parameter that changes nothing is a
-    parameter a student has to be told about, and the honest answer would be that it does not matter here.
+    **One cone, and the distance inside which it is not asked.** The obvious extra parameter is hysteresis —
+    enter `driving` at `aim_tolerance` but leave it only at a wider one, which is what a switch with a dead
+    band does and what any textbook would ask for here. It was implemented, and measured on identical runs
+    across the empty hall with the band closed and open: 9 changes of phase per minute against 12, both with a
+    couple of changes inside 100 ms of one another. No difference — and a dead band widens the error this
+    controller is supposed to be at its most accurate about, so it stayed out.
+
+    What the switching needed was a distance, not a wider cone, because the trouble is not the flip but the
+    authority available after it: at the cone edge the orient phase turns at `gain_turn · aim_tolerance` =
+    0.144 rad/s, and the bearing to a near place swings faster than that. So inside `aim_commit` metres the
+    cone is not consulted again, and the straight line that replaces the argument is bounded rather than hoped
+    for:
+
+        cross-track of the committed line <= aim_commit * sin(aim_tolerance)     # 0.25 * 0.08 = 0.02 m
+
+    That has to stay inside `arrive_distance` — 0.02 m against 0.12 m — or committing would be a licence to
+    miss, and the inequality is the only thing tying these two defaults together. It is checkable with a
+    calculator before a robot moves, which is the test a parameter like this deserves: `aim_tolerance:=0.5`
+    puts the committed line 0.12 m off the place, exactly the whole tolerance, and the demo of a controller
+    that arrives wide is better run at 0.25 rad (0.062 m) where the rule still holds.
 
     **Arrived** is measured to the place, not along the path. A controller that finishes on distance driven
     reports success with the robot in a wall; that failure belongs to `turn_and_move.drive_straight` and is
     documented there.
+
+    **Nothing here commands `vy`, and that is the point rather than an omission.** A node that strafed at the
+    place while facing elsewhere is `turn_and_move.drive_to`, and the reason these two files sit side by side
+    is that this one pays for the aim with stopped seconds and that one does not. Measured: 0 % of the samples
+    of a 6.0 m run carry a sideways command here, against 49 % there.
     """
     x, y, heading = pose[0], pose[1], pose[2]
     remaining = hypot(goal[0] - x, goal[1] - y)
@@ -140,7 +173,7 @@ def orient_then_drive(pose, goal, gain_turn=1.8, turn_limit=1.2, speed=0.3, dece
         return Motion(ARRIVED, 0.0, 0.0, 0.0, remaining)
 
     heading_error = wrap(atan2(goal[1] - y, goal[0] - x) - heading)
-    if abs(heading_error) > aim_tolerance:
+    if remaining > aim_commit and abs(heading_error) > aim_tolerance:
         return Motion(ORIENTING, 0.0, max(-turn_limit, min(turn_limit, gain_turn * heading_error)),
                       heading_error, remaining)
     return Motion(DRIVING, speed * min(1.0, remaining / decelerate_over), 0.0, heading_error,
@@ -190,6 +223,13 @@ class MoveToPoint(Node):
             "aim_tolerance": 0.08,               # rad, 4.6°: outside this the robot turns and does not drive
             "arrive_distance": 0.12,             # m, from here the place counts as reached
             "decelerate_over": 0.25,             # m: the last stretch; must exceed arrive_distance
+            "aim_commit": 0.25,                  # m: nearer the place than this, the cone is not asked again.
+                                                 # Not taste: the line committed at this range passes the place
+                                                 # no further off than aim_commit * sin(aim_tolerance) = 0.02 m,
+                                                 # which has to stay inside arrive_distance (0.12 m) or the
+                                                 # commit would be a licence to miss. What set it is the run in
+                                                 # the module docstring: 36 phase changes and a finish 0.187 m
+                                                 # short of a place this node was told to reach.
             "period": 0.05,
             "view": True,                        # the overlay; `view:=false` for the projector-poor
             "view_topic": "move_view",
@@ -199,7 +239,7 @@ class MoveToPoint(Node):
         self.robot = str(self.get_parameter("robot").value)
         self.settings = {name: float(self.get_parameter(name).value)
                          for name in ("speed", "gain_turn", "turn_limit", "aim_tolerance",
-                                      "arrive_distance", "decelerate_over")}
+                                      "arrive_distance", "decelerate_over", "aim_commit")}
         self.pose, self.goal, self.phase = None, None, NO_GOAL
         self.typed, self.said_no_tf = False, False      # who is driving, and what has been said already
         self.view_pub = None

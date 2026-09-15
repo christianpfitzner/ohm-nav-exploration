@@ -20,7 +20,7 @@ moved rather than watch a robot ignore them.
 cells — 30 × 20 m — and four walls, so a `drive 5.0` measures what the odometry reports rather than what the
 first obstacle allowed. In `rooms` the same command ends at a doorway and the lesson becomes a different one.
 
-Two things to do with it while it is on the screen, both of which take under a minute:
+Three things to do with it while it is on the screen, the first two of which take under a minute:
 
 * `turn 90` with the default gains, then `turn_and_move` started again with `turn_tolerance:=0.2`. The robot
   stops 11 degrees early and nobody touched the controller. The tolerance is what declares a turn finished,
@@ -30,6 +30,15 @@ Two things to do with it while it is on the screen, both of which take under a m
   robot never drove. `drive` counts metres of wheels and finishes "successfully" with the robot where it
   started. That is the reason the frontier node in this package reads a mapper's map instead of trusting
   this odometry, and this is the cheapest place in the whole repository to show it.
+
+`strafe:=true` is the third thing worth doing, and it is off by default: the node then commands `vx` and `wz`
+only. The number behind that default is one 6.0 m goal in this very hall with the lateral term live — **49 % of
+the samples carried a sideways command of up to 0.15 m/s, and 1.36 m of the 8.51 m travelled was sideways travel
+for 5.90 m of net displacement** (`tools/try_demo.sh reactive_turn_and_move.launch.py <robot> <domain> 28`, the
+`sideways command` line of its report). Both settings arrive; only one of them looks to a hall like a robot
+going sideways for no visible reason, and `measure_drive`'s `path/net` was 1.4 against 1.2 for the demo with no
+lateral term at all. Turn the switch on to show what a mecanum base is for, and off again to show what that
+looks like from the back of the room.
 
 Nothing here asks for the tf tree or the lidar's no-echo dialect that `explore.launch.py` is careful about.
 There is no mapper and no navigation stack in this graph, so there is no second publisher of
@@ -85,6 +94,11 @@ def generate_launch_description():
                               description="m; a `go` goal inside this counts as reached"),
         DeclareLaunchArgument("turn_tolerance", default_value="0.05",
                               description="rad; the P controller never arrives, this declares it finished"),
+        DeclareLaunchArgument("strafe", default_value="false",
+                              description="command vy as well as vx and wz. Off: the default run is car-like, "
+                                          "because 49 % of the samples of a 6 m goal otherwise carried a sideways "
+                                          "command and 1.36 m of the path was sideways travel. On: the mecanum "
+                                          "sum holds a line and walks diagonally at the place"),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([sim_dir(), "launch", "lab.launch.py"])),
@@ -103,6 +117,8 @@ def generate_launch_description():
                 "turn_limit": ParameterValue(LaunchConfiguration("turn_limit"), value_type=float),
                 "arrive_distance": ParameterValue(LaunchConfiguration("arrive_distance"), value_type=float),
                 "turn_tolerance": ParameterValue(LaunchConfiguration("turn_tolerance"), value_type=float),
+                # a launch argument arrives as text and this one is a bool in the node
+                "strafe": ParameterValue(LaunchConfiguration("strafe"), value_type=bool),
             }],
         ),
     ])

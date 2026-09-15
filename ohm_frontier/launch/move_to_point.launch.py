@@ -21,6 +21,17 @@ computable before the robot moves: 0.08 rad at 10 m is 80 cm of sideways error t
 still call reached. The second is the shape of the turn, and `turn_limit` is what stops it asking for rates the
 wheels cannot deliver. Change one, run the same `go`, compare where it stopped — that is the whole lecture.
 
+The third is `aim_commit`, and it is the one that decides whether the run ends at the place at all. Asking the
+nose to stay inside a fixed cone works down the hall and stops working near home, because at the edge of a
+0.08 rad cone the orient phase turns at `gain_turn × aim_tolerance` = 0.144 rad/s while the bearing to a place
+0.3 m away swings at 0.08 rad/s: measured over a 6.0 m goal in this hall, 36 changes of phase in 25 s of
+driving, 9 of them in the last 1.7 s, 16 % of the last 10 s spent turning on the spot, and the run ending
+**0.187 m from the place — outside the node's own 0.12 m arrival tolerance**. Inside `aim_commit` metres the
+cone is not asked again, which is safe because the straight line that replaces it passes the place no further
+off than `aim_commit × sin(aim_tolerance)` = 0.02 m. Raise `aim_tolerance` to 0.5 rad and that product is
+0.12 m — the whole tolerance — and the pair stops being independent, which is the arithmetic to do before the
+robot moves.
+
 RViz is **on** here, unlike the other three demos, and it is the point of the file: the view is this node's own
 overlay (`view:=true`, the default) — the line to the place, the line the nose points along, the command as an
 arrow and the phase with its two numbers as text (`view_markers.py`). The other demos are legible from the hall
@@ -44,7 +55,9 @@ import tempfile
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, LogInfo,
-                            OpaqueFunction)
+                            OpaqueFunction, TimerAction)
+from launch.conditions import IfCondition
+from launch.substitutions import PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
@@ -113,7 +126,11 @@ def generate_launch_description():
         DeclareLaunchArgument("headless", default_value="false",
                               description="without the simulator window (sets SDL_VIDEODRIVER=dummy)"),
         DeclareLaunchArgument("rviz", default_value="true",
-                              description="the view of what the controller is deciding; rviz_config:= for another"),
+                              description="the view of what the controller is deciding; rviz_config:= for "
+                                          "another. On a machine with no display this becomes the apt-line "
+                                          "comment below rather than a dead process — measured: rviz2 aborts "
+                                          "with exit -6 without $DISPLAY, and while it was a required process "
+                                          "it ended the launch with the controller inside it"),
         DeclareLaunchArgument("rviz_config", default_value=os.path.join(
             get_package_share_directory("ohm_frontier"), "rviz", "drive.rviz"),
             description="the frontier view on a camera close enough to read the phase over the robot; "
@@ -121,6 +138,12 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("goal_topic", default_value="/frontier_goal",
                               description="where a place to drive to comes from; empty for typed commands only"),
+        DeclareLaunchArgument("goal", default_value="3.0 0.0",
+                              description="a place to drive to, as `x y` or `x,y`, published once on "
+                                          "`<robot>/move_command` five seconds in; empty for none. The node takes its places from outside "
+                                          "— that is what the `arrived` line is evidence about — and a demo "
+                                          "that needs a second terminal to type the first one is a demo that "
+                                          "sits still for its own first five seconds"),
         DeclareLaunchArgument("markers", default_value="true",
                               description="publish the overlay markers this node is drawn from; not named "
                                           "`view` because the simulator declares that name for its window"),
@@ -132,6 +155,11 @@ def generate_launch_description():
         DeclareLaunchArgument("turn_limit", default_value="1.2", description="rad/s ceiling on the turn"),
         DeclareLaunchArgument("arrive_distance", default_value="0.12",
                               description="m; nearer than this to the place and it counts as reached"),
+        DeclareLaunchArgument("aim_commit", default_value="0.25",
+                              description="m; nearer than this the cone is not asked again. Bound, not taste: a "
+                                          "line committed here passes the place at aim_commit*sin(aim_tolerance) "
+                                          "= 0.02 m, which must stay inside arrive_distance. It is what stops the "
+                                          "node re-aiming five times a second over the last half metre"),
     ]
 
     simulator = IncludeLaunchDescription(
@@ -153,8 +181,15 @@ def generate_launch_description():
             "gain_turn": ParameterValue(LaunchConfiguration("gain_turn"), value_type=float),
             "turn_limit": ParameterValue(LaunchConfiguration("turn_limit"), value_type=float),
             "arrive_distance": ParameterValue(LaunchConfiguration("arrive_distance"), value_type=float),
+            "aim_commit": ParameterValue(LaunchConfiguration("aim_commit"), value_type=float),
         }],
     )
+
+    # One place, once, five seconds in: the demo's own first goal, on the same topic a person would type on.
+    # The node takes its places from outside by design — that is what its `arrived` line is evidence about —
+    # and measured without this it sat in the middle of `open` making 1.14 m of path and 0.00 m of net over
+    # 45 s, which is not a controller failing but a controller waiting. `goal:=` empty takes it away again.
+    ask = OpaqueFunction(function=publishes_a_goal, args=[LaunchConfiguration("goal"), robot])
 
     # The view is the FIRST entity, and that position is load-bearing rather than tidiness. An included launch
     # file writes its own arguments into *this* file's configuration space — measured, not inferred: a file
@@ -167,7 +202,7 @@ def generate_launch_description():
     # default-on view stopped being on. `test_launch_files.py` keeps this in front of the include.
     view = OpaqueFunction(function=started_by_view, args=[LaunchConfiguration("rviz"),
                                                           LaunchConfiguration("rviz_config"), robot, sim_time])
-    return LaunchDescription(arguments + [view, simulator, node])
+    return LaunchDescription(arguments + [view, simulator, node, ask])
 
 
 def started_by_view(context, *args, **kwargs):
@@ -189,7 +224,87 @@ def started_by_view(context, *args, **kwargs):
     if shutil.which("rviz2") is None:
         return [LogInfo(msg=f"[move_to_point] no rviz2 on this machine — the simulator's window is the only "
                             f"view, `{RVIZ_INSTALL_HINT}` adds this one, `rviz:=false` stops asking for it")]
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        # Measured on a machine with neither variable set: rviz2 comes up, aborts, and leaves
+        # `process has died [exit code -6]` — and while it was a required process, that death ended the whole
+        # launch, simulator and controller included: 45 s of a demo that never moved is a expensive way to
+        # learn the viewer is optional. So the missing display is said out loud where the missing package is,
+        # and the viewer below is no longer allowed to take the launch with it.
+        return [LogInfo(msg="[move_to_point] no display on this machine ($DISPLAY and $WAYLAND_DISPLAY are both "
+                            "unset) — rviz2 aborts on start, so the simulator's window is the only view; "
+                            "`rviz:=false` stops asking for it")]
     command = ["rviz2", "--display-config", written(read(args[1]), read(args[2]))]
     if read(args[3]) in TRUE:
         command += ["--ros-args", "-p", "use_sim_time:=true"]
+    # No error policy is available on `ExecuteProcess` in this ROS (measured: passing one is
+    # `Action.__init__() got an unexpected keyword argument 'on_error_policy'`, raised while building the
+    # launch, before anything starts), so a viewer that dies here still takes the run with it — which is why
+    # the two checks above ask about the display and the package *before* handing rviz2 a process at all.
     return [ExecuteProcess(cmd=command, name="move_to_point_view", output="screen")]
+    # The view is the FIRST entity, and that position is load-bearing rather than tidiness. An included launch
+    # file writes its own arguments into *this* file's configuration space — measured, not inferred: a file
+    # that declares `rviz` with default `true`, includes `lab.launch.py` with `rviz:=false`, and reads `rviz`
+    # again afterwards reads back `false`, and reads back `robots` as empty although nobody mentioned it. The
+    # simulator declares `world, robot, robots, controller, task, grade, seconds, headless, use_sim_time,
+    # config, view, layers, rviz, truth, log, json, seed, tf_tree, lidar_no_echo` (`BASICS` in
+    # `mecanum-lab/launch/lab.launch.py`), so it overwrites the one argument this decision is made of. Read
+    # before the include and the answer is ours; read after it and the answer is `false`, which is how the
+    # default-on view stopped being on. `test_launch_files.py` keeps this in front of the include.
+    view = OpaqueFunction(function=started_by_view, args=[LaunchConfiguration("rviz"),
+                                                          LaunchConfiguration("rviz_config"), robot, sim_time])
+    return LaunchDescription(arguments + [view, simulator, node, ask])
+
+
+def started_by_view(context, *args, **kwargs):
+    """rviz2 on this package's view, or the one line that says why there is none.
+
+    The same three judgements `explore.launch.py` makes, for the same reasons: `rviz:=false` was asked for and
+    needs no comment; a machine without `rviz2` gets the apt line rather than a screen ending in `process has
+    died`; and the viewer is told `use_sim_time`, because the simulator stamps its transforms in seconds since
+    it started and a viewer on the wall clock thinks the whole run happened 1.7 billion seconds ago and draws
+    nothing.
+    """
+    read = lambda given: perform_substitutions(                      # noqa: E731
+        context, normalize_to_list_of_substitutions(given))
+    if read(args[0]) not in TRUE:
+        return []
+    complaint = missing(read(args[1]))
+    if complaint:
+        return [LogInfo(msg=complaint)]
+    if shutil.which("rviz2") is None:
+        return [LogInfo(msg=f"[move_to_point] no rviz2 on this machine — the simulator's window is the only "
+                            f"view, `{RVIZ_INSTALL_HINT}` adds this one, `rviz:=false` stops asking for it")]
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        # Measured on a machine with neither variable set: rviz2 comes up, aborts, and leaves
+        # `process has died [exit code -6]` — and while it was a required process, that death ended the whole
+        # launch, simulator and controller included: 45 s of a demo that never moved is a expensive way to
+        # learn the viewer is optional. So the missing display is said out loud where the missing package is,
+        # and the viewer below is no longer allowed to take the launch with it.
+        return [LogInfo(msg="[move_to_point] no display on this machine ($DISPLAY and $WAYLAND_DISPLAY are both "
+                            "unset) — rviz2 aborts on start, so the simulator's window is the only view; "
+                            "`rviz:=false` stops asking for it")]
+    command = ["rviz2", "--display-config", written(read(args[1]), read(args[2]))]
+    if read(args[3]) in TRUE:
+        command += ["--ros-args", "-p", "use_sim_time:=true"]
+    return [ExecuteProcess(cmd=command, name="move_to_point_view", output="screen",
+                           on_error_policy="ignore")]
+
+
+def publishes_a_goal(context, *args, **kwargs):
+    """One `go x y` on `<robot>/move_command`, five seconds after the hall comes up.
+
+    Read rather than substituted because a launch condition only understands `true/1/false/0` — measured, the
+    exception is `invalid condition expression, expected one of [true, 1, false, 0] but got '3.0 0.0'` — and
+    "is there a goal at all" is a question about a coordinate pair, not a boolean.
+    """
+    read = lambda given: perform_substitutions(                      # noqa: E731
+        context, normalize_to_list_of_substitutions(given))
+    # a comma is accepted as well as a space because a launch argument with a space in it has to be quoted
+    # twice over to survive the shell, and a demo whose first step is a quoting lesson is not a demo
+    goal, robot = read(args[0]).strip().replace(",", " "), read(args[1])
+    if not goal:
+        return []
+    return [TimerAction(period=5.0, actions=[ExecuteProcess(
+        cmd=["ros2", "topic", "pub", "--once", f"/{robot}/move_command", "std_msgs/msg/String",
+             f"data: 'go {goal}'"],
+        name="move_to_point_goal", output="screen")])]
