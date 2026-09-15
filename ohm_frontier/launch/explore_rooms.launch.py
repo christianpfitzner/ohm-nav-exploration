@@ -18,9 +18,10 @@ explained with, and the ranking has something to choose between — the wide doo
 the crack beside the wheel.
 
 What to watch: the list of frontiers in RViz, one clump per room, and which arrow the node picks. Then the
-part that is not working yet and is worth showing anyway: from this spawn the controller accepts a goal
-and publishes nothing (README, "Not working yet"), so the arrows change while the robot stands still. That
-is a defect in `config/nav2_rooms.yaml`, not in the ranking, and it is easier to see here than anywhere.
+arrows disappearing one at a time — `reached (10.51, 12.33)`, `reached (12.21, 11.33)`, five of them inside
+two minutes headless on this machine — with the map filling in behind the robot. If the arrows change while
+the robot stands still, the driving is not connected rather than the ranking being wrong: the fourth pit in
+the README is that, and it looks like a controller that never commands anything.
 """
 import os
 

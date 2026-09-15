@@ -89,7 +89,7 @@ the one that loses shows an empty map while the other one is right.
 | `explore_arena.launch.py` | `arena` | an empty hall whose painted lanes reflect nothing back to the lidar: the map is what the sensors say, not what the world file says |
 | `explore_no_nav2.launch.py` | `rooms` | `nav2:=false` in a file: no planner, no controller, the goals only on `/frontier_goal` and in RViz — the ranking, the timeout and the blacklist in seconds, with nobody to blame |
 
-## Three things that will otherwise bite you
+## Four things that will otherwise bite you
 
 The launch file handles the first two; **[the simulator's two quirks](docs/frontier-exploration.md#the-simulators-two-quirks)**
 has the measurements and the tf diagram.
@@ -109,6 +109,18 @@ has the measurements and the tf diagram.
   `false` — and reads `robots` as empty, though nobody mentioned it. The two launch files here that open a view
   now decide it *before* the include, and `test_launch_files.py` keeps them in that order, because the failure
   mode was a default-on RViz that started nothing and printed nothing at all.
+* **The velocity command changes message type on its way to the robot.** On Kilted, every nav2 node that
+  writes or reads a speed command has `enable_stamped_cmd_vel`, and it picks the *type* of the hop, not its
+  rate: true is `TwistStamped`, false is `Twist` — and nav2's default is true. The simulator drives from a
+  `Twist` on `/<robot>/cmd_vel` (`mecanum-lab` CONTRACT §6.9, and one `Twist` is what a student's own node
+  publishes while they hold `w`). DDS refuses to match two endpoints of different types and does not mention
+  that it refused: measured with a goal 1.5 m away, `/cmd_vel_nav`, `/cmd_vel_smoothed` and `/muster/cmd_vel`
+  each carried 20 Hz, each `TwistStamped`, each `vx=+0.350` for the whole goal, the collision monitor passing
+  every command through — and the odometry did not move 0.01 m off the spawn. `ros2 topic echo` and `--hz`
+  pick one type and then report *no messages* about the other, so this looks exactly like a controller that
+  never commands anything, which is what this README and the docs said about the `rooms` spawn until the
+  chain was measured with a subscriber for each type side by side. All four flags are **one** setting in
+  `config/nav2_rooms.yaml`, and `test_nav2_command_chain.py` keeps them one setting and the last hop a `Twist`.
 
 ## The control examples
 
@@ -190,11 +202,12 @@ cd ohm_frontier && python3 -m pytest test              # the rules, with no ROS 
 One thing costs a student an hour, so it goes here: **in a shell that has ROS sourced that last command dies
 before it collects anything.** ROS 2 Kilted advertises a `launch_testing` pytest plugin whose hook arguments
 the pip pytest here (9.1.1) no longer accepts, so the suite needs `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
-python3 -m pytest test -q` — the same line `./install.sh --check` prints. Measured with that: **102 passed**,
+python3 -m pytest test -q` — the same line `./install.sh --check` prints. Measured with that: **107 passed**,
 in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the working directory. What is covered is in the
 test names: the frontier rules, the life of a goal from candidate to blacklist, the reactive maths, the markers
-each demo draws, and the launch files — a launch file being the one kind of file here whose wrong imports were
-invisible until someone typed `ros2 launch`, and the overlay code that no arithmetic test can reach — two bugs
+each demo draws, the topic and message type of every hop a velocity command travels, and the launch files — a
+launch file being the one kind of file here whose wrong imports were invisible until someone typed
+`ros2 launch`, and the overlay code that no arithmetic test can reach — two bugs
 shipped there, a `cos` that was never imported and a text marker placed by the field RViz does not read for text.
 The two newest of those paid for themselves the day they were written: one compares every `executable=` in every launch file against `setup.py`, by globbing rather than by a
 list of names somebody has to remember to extend, and one checks that each ROS-guarded import actually got its
@@ -205,6 +218,11 @@ its own guard, with "no rclpy here. Source a ROS 2 installation" on a machine th
 
 * The stack comes up, every nav2 lifecycle node configured and activated, and this node's goals are accepted
   and driven: a goal 0.2 m away was reported `reached` by both the stack and this node.
+* **Exploration has been seen to explore**, headless in `rooms`: the first two goals refused outright while
+  `bt_navigator` was still activating (the three-refusal rule absorbing both), then `reached (10.51, 12.33)`,
+  `reached (12.21, 11.33)`, and five frontiers reached inside two minutes while the odometry covered 3.60 m
+  per 10 s — the pace `desired_linear_vel: 0.35` asks for. One typed goal on the same run: `SUCCEEDED`,
+  2.65 m driven, and the command chain on all three hops at 20 Hz as a `Twist`.
 * Mapping needs motion. Standing at the `rooms` spawn the map holds 1 414 free cells and 2 walls; after 20 s
   of driving the same map holds 18 022 free cells and 767. Same robot, hall and parameters.
 * Getting the stack to come up at all needed four things, each measured and each written into
@@ -235,12 +253,5 @@ its own guard, with "no rclpy here. Source a ROS 2 installation" on a machine th
 
 Not working yet, measured on this machine:
 
-* In the spawn pocket the controller accepts a goal and then publishes **nothing** — 18 s of listening on
-  `/cmd_vel_nav`, `/cmd_vel_smoothed` and `/muster/cmd_vel` while a goal was active, nothing on any of them
-  — and after 30 s answers `Failed to make progress`. The simulator is not the problem: the same robot driven
-  by hand over the same topic moved 1.19 m in 6 s. So the defect is in `config/nav2_rooms.yaml`, in what the
-  controller or the collision monitor makes of a goal inside a map whose every free cell is within half a
-  metre of a wall. Exploration as a whole does not take off from the `rooms` spawn yet; the frontier rules
-  are tested, and the loop closes once the robot moves.
 * The `hall` frame (`tf.tree: slam`) is in neither `mecanum_lab/types.py`'s defaults nor that repo's CONTRACT
   — `mecanum_lab/tf_bcast.py` carries the default.

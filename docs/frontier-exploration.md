@@ -140,10 +140,12 @@ node that does not handle this asks for the impossible forever. Four things are 
   `avoid` and `avoid_radius` (0.75 m) takes the surroundings with it — otherwise the next clump is chosen
   two cells along the same blocked doorway and the robot does the same trip again.
 * **A clock that runs on progress, not on the calendar.** A goal is written off once the robot has not come
-  `progress_distance` (0.25 m) nearer to it within `goal_timeout_s` (10 s). Ten seconds of standing still is
-  the measured failure at the spawn pocket — the controller took the goal and published nothing on any
-  `cmd_vel` topic for 18 s — and ten seconds without approaching is also what a frontier on the far side of a
-  wall looks like from here. It is deliberately not a deadline for the whole drive: a frontier at the end of a
+  `progress_distance` (0.25 m) nearer to it within `goal_timeout_s` (10 s). Ten seconds is what a robot that
+  will never move costs this node: the driving can be disconnected in a way that leaves the map, the plan and
+  the view all perfect — this hall has done it, with nav2's commands on the wire as a `TwistStamped` in front
+  of a simulator that listens for a `Twist` (the fourth pit in the README) — and ten seconds without
+  approaching is also what a frontier on the far side of a wall looks like from here. It is deliberately not a
+  deadline for the whole drive: a frontier at the end of a
   hall is perfectly reachable and takes far longer, and what restarts the clock is any approach of
   `progress_distance` past the nearest gap so far. The version before this one had `stall_s` (25 s) and
   `patience_s` (120 s), two calendar deadlines, which between them amounted to blacklisting a whole hall

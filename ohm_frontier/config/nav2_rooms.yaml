@@ -18,11 +18,25 @@
 # as parameters of that node and the costmap comes up with its defaults — measured: it then waited for a
 # transform from `base_link` to `map`, a pair this tree does not contain, the controller never activated, and
 # the whole stack stayed unusable while nothing in the log mentioned the costmap's parameters.
+#
+# **`enable_stamped_cmd_vel` is false on all four nodes of the command chain, and they are one setting, not
+# four.** Every nav2 node that writes or reads a velocity command has this switch, and it picks the *message
+# type* of the hop, not its rate: true is `geometry_msgs/msg/TwistStamped`, false is `geometry_msgs/msg/Twist`.
+# Kilted ships it as **true**; the simulator listens to `/<robot>/cmd_vel` as a `Twist` (`CONTRACT` §6.9, and
+# one Twist is what a student's own node publishes with the keyboard). DDS will not connect a publisher and a
+# subscription of different types, and it says nothing when it does not — measured with a goal 1.5 m away: 20 Hz
+# on `/cmd_vel_nav`, `/cmd_vel_smoothed` and `/muster/cmd_vel`, all three `TwistStamped`, all three carrying
+# `vx=+0.350` the whole time, the collision monitor passing every one of them through, and the robot standing
+# at its spawn with the odometry not moving 0.01 m. The map, the plan, the costmaps and the view were all
+# right; only the last hop was wire that nothing was listening on. `ros2 topic echo` and `--hz` answer "no
+# messages" for a topic whose published type differs from the one they guessed, which is why this took a
+# subscriber of each type side by side to see. Set one of the four to true and that is the whole failure again.
 
 controller_server:
   ros__parameters:
     use_sim_time: True
     controller_frequency: 20.0
+    enable_stamped_cmd_vel: False         # a Twist on /cmd_vel_nav, which is what the smoother reads
     odom_topic: /<robot>/odom
     progress_checker_plugin: progress_checker
     goal_checker_plugins: [general_goal_checker]
@@ -65,6 +79,7 @@ planner_server:
 behavior_server:
   ros__parameters:
     use_sim_time: True
+    enable_stamped_cmd_vel: False         # the recovery drives (spin, backup) are commands too
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
@@ -98,6 +113,7 @@ smoother_server:
 velocity_smoother:
   ros__parameters:
     use_sim_time: True
+    enable_stamped_cmd_vel: False         # reads /cmd_vel_nav and writes /cmd_vel_smoothed, both as Twists
     odom_topic: /<robot>/odom
     smoothing_frequency: 20.0
     max_velocity: [0.40, 0.0, 1.0]          # the model drives these numbers without slipping
@@ -114,8 +130,9 @@ collision_monitor:
     use_sim_time: True
     base_frame_id: <robot>/base_link
     odom_frame_id: <robot>/odom
+    enable_stamped_cmd_vel: False         # in as a Twist, and out to the simulator as a Twist
     cmd_vel_in_topic: cmd_vel_smoothed
-    cmd_vel_out_topic: /<robot>/cmd_vel
+    cmd_vel_out_topic: /<robot>/cmd_vel   # the topic the simulator drives from, as a Twist
     state_topic: collision_monitor_state
     transform_tolerance: 0.2
     source_timeout: 1.0

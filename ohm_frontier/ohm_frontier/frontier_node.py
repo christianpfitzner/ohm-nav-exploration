@@ -347,9 +347,11 @@ class FrontierNode(Node):
         """Arrived, or not arriving. The clock that matters runs on progress, not on the calendar.
 
         `goal_timeout_s` — 10 s — is how long the robot may fail to come nearer before the goal is written
-        off. Ten seconds of standing still is the measured failure at the spawn pocket (the controller
-        accepted the goal and published nothing on any cmd_vel topic for 18 s), and ten seconds without
-        approaching is also what a frontier on the far side of a wall looks like from here.
+        off. Ten seconds is the shortest wait that still separates the two things it can be waiting for: a
+        robot whose velocity command never arrives (the stack can be whole, the plan computed and the commands
+        flowing on a topic nothing here subscribes to — a TwistStamped in front of a base that wants a Twist,
+        see the fourth pit in the README), and a frontier on the far side of a wall, which looks the same from
+        here and is not worth another hour.
 
         It is deliberately not a deadline for the whole drive. A frontier at the far end of a hall is
         perfectly reachable and takes far longer than 10 s, and a rule that wrote those off would blacklist a
