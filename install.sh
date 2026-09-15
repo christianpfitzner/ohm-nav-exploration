@@ -113,6 +113,16 @@ else
        "sudo apt install python3-pytest     (or: ./install.sh --pip)"
 fi
 
+# Pillow is the one library here that exists for a picture: `tools/record_view.py` draws the animation on the
+# front page and `test/test_record_view.py` proves it still draws one. Nothing on the robot touches it, so a
+# machine without it gets a note rather than a failed check — the exploration runs, only the GIF tool does not.
+if python3 -c 'import PIL' >/dev/null 2>&1; then
+  ok "Pillow $(python3 -c 'import PIL; print(PIL.__version__)') — record_view.py's pictures, and their tests"
+else
+  note "no Pillow — the robot and every test but the drawing ones are fine"
+       "sudo apt install python3-pil        (or: ./install.sh --pip), if you want the GIF tool"
+fi
+
 # ---------------------------------------------------------------- ROS 2: sourced, or invisible
 # ROS_DISTRO is set by a shell that sourced a setup file, so an empty one does not mean "no ROS", it
 # means "not in this terminal" — which for the student fails the same way: ros2: command not found.

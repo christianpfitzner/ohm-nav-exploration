@@ -20,3 +20,8 @@ pytest>=8.0
 # the simulator's — so this is here because explore.launch.py cannot run without that checkout working,
 # and pygame is the only thing it needs. The simulator's own requirements.txt is the authority on it.
 pygame>=2.5
+
+# Pillow is for one thing: `tools/record_view.py` draws the animation on the front page out of the topics a live
+# run publishes, and `test/test_record_view.py` proves it still draws one. No ROS node imports it, so a machine
+# without it runs the robot and the rest of the suite happily — ./install.sh --check says so as a note.
+Pillow>=9.0
