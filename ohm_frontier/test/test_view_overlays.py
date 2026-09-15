@@ -113,16 +113,20 @@ def test_the_point_controller_draws_nothing_before_the_odometry_arrives():
 
 
 def test_the_wall_follower_draws_the_four_bearings_it_reads_and_the_gap_it_keeps():
-    node = SimpleNamespace(view_pub=Recorder(), scan=a_scan(), scan_frame="muster/base_link/laser", want=0.40,
-                           state=FOLLOWING, range_max=8.0, increment=TWO_PI / 360, get_clock=Clock)
-    by_namespace = drawn_by(wall_following.WallFollower.draw, node, Steering(0.35, -0.2, FOLLOWING, 0.42))
+    node = SimpleNamespace(view_pub=Recorder(), scan=a_scan(), scan_frame="muster/base_link/laser", want=0.50,
+                           state=(FOLLOWING, True), range_max=8.0, increment=TWO_PI / 360, get_clock=Clock)
+    by_namespace = drawn_by(wall_following.WallFollower.draw, node,
+                            Steering(0.35, -0.2, FOLLOWING, 0.42, -0.15, True, 0.0))
 
     assert {"echoes", "reads_ahead", "reads_right", "reads_right_ahead", "reads_right_behind", "wanted",
-            "command", "numbers"} <= set(by_namespace), f"it drew {sorted(by_namespace)}"
+            "measured", "aim", "command", "numbers"} <= set(by_namespace), f"it drew {sorted(by_namespace)}"
     echoes = by_namespace["echoes"]
     assert echoes.type == echoes.SPHERE_LIST and len(echoes.points) == 360, \
         "one dot per beam that came back, which is exactly the claim `echoed` makes"
     assert by_namespace["wanted"].points[1].y < 0, "the gap it keeps is on the right, so it is drawn on the right"
+    assert by_namespace["measured"].points[1].y < 0, (
+        "the measured gap goes out on the bearing the wanted one does: those two lines are the error term, "
+        "drawn instead of spoken")
     assert by_namespace["numbers"].text.startswith(FOLLOWING), "the sentence over the robot is the log's own"
 
 
@@ -149,9 +153,9 @@ def test_nothing_is_drawn_at_all_when_a_node_has_no_view_publisher():
                            get_clock=Clock)
     move_to_point.MoveToPoint.draw(node, Motion(ARRIVED, 0.0, 0.0, 0.0, 0.1))
 
-    follower = SimpleNamespace(view_pub=None, scan=a_scan(), scan_frame="f", want=0.4, state=FOLLOWING,
+    follower = SimpleNamespace(view_pub=None, scan=a_scan(), scan_frame="f", want=0.4, state=(FOLLOWING, True),
                                range_max=8.0, increment=TWO_PI / 360, get_clock=Clock)
-    wall_following.WallFollower.draw(follower, Steering(0.3, 0.0, FOLLOWING, 0.4))
+    wall_following.WallFollower.draw(follower, Steering(0.3, 0.0, FOLLOWING, 0.4, 0.0, True, 0.0))
 
     field = SimpleNamespace(view_pub=None, scan=a_scan(), scan_frame="f", aim=0.0,
                             settings=dict(repulsion_range=2.0), range_max=8.0, increment=TWO_PI / 360,

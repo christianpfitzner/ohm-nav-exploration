@@ -4,11 +4,13 @@
     ros2 launch ohm_frontier reactive_wall_follow.launch.py world:=production robot:=carlo
 
 The wall follower of `wall_following.py` against a real hall. `rooms` is the default because it is the
-smallest hall that shows both states: the robot is set down in a pocket with a wall on its right, follows
-it out through the doorway, and loses it in the open part of the hall — where the node stops, turns on
-the spot and says so, which is the moment worth putting on the projector. `production` is the second
-choice and the better one for the shelf aisles: there the rule follows an aisle for a hundred metres, and
-the failure to show is at the end of the aisle, where the wall stops and the robot keeps turning right.
+smallest hall that shows all three phases in one run: the robot is set down in the middle of a wide room —
+measured from the spawn, its nearest wall is 3.5 m to the right and 3.25 m ahead, so there is no wall to
+follow yet — and the node therefore closes on one (`APPROACHING`), converges onto the 0.50 m gap
+(`converging`), follows it out through a doorway, loses it in the open part of the hall and says so
+(`looking for a wall`). `production` is the second choice and the better one for the shelf aisles: there the
+rule follows an aisle for a hundred metres, and the failure to show is at the end of the aisle, where the
+wall stops and the robot keeps turning right.
 
 Nothing here asks for the tf tree or the lidar's no-echo dialect that `explore.launch.py` is careful
 about, and that is deliberate rather than an oversight: with no mapper in the graph the simulator keeps
@@ -54,9 +56,18 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="false",
                               description="the simulator's RViz too; the hall window is the display here"),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
-        DeclareLaunchArgument("wall_distance", default_value="0.40",
-                              description="m, the gap to keep on the right hand"),
-        DeclareLaunchArgument("speed", default_value="0.35", description="m/s"),
+        DeclareLaunchArgument("wall_distance", default_value="0.50",
+                              description="m to keep between the KINEMATIC CENTRE and the wall, on the right"),
+        DeclareLaunchArgument("speed", default_value="0.35", description="m/s once at that gap"),
+        DeclareLaunchArgument("find_speed", default_value="0.25",
+                              description="m/s while the gap is not the wanted one yet: closing on a far wall "
+                                          "and converging onto it both go at this pace"),
+        DeclareLaunchArgument("max_wall_range", default_value="2.0",
+                              description="m; an echo on the right beyond this is a direction to drive "
+                                          "towards, not a gap to regulate"),
+        DeclareLaunchArgument("laser_offset_y", default_value="0.0",
+                              description="m the lidar sits left of the kinematic centre; the simulator "
+                                          "mounts it at [0,0,0], so 0 unless your robot carries it elsewhere"),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([sim_dir(), "launch", "lab.launch.py"])),
@@ -70,9 +81,12 @@ def generate_launch_description():
             parameters=[{
                 "robot": robot,
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
-                # a launch argument arrives as text and these two are numbers in the node
+                # a launch argument arrives as text and these are numbers in the node
                 "wall_distance": ParameterValue(LaunchConfiguration("wall_distance"), value_type=float),
                 "speed": ParameterValue(LaunchConfiguration("speed"), value_type=float),
+                "find_speed": ParameterValue(LaunchConfiguration("find_speed"), value_type=float),
+                "max_wall_range": ParameterValue(LaunchConfiguration("max_wall_range"), value_type=float),
+                "laser_offset_y": ParameterValue(LaunchConfiguration("laser_offset_y"), value_type=float),
             }],
         ),
     ])
