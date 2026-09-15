@@ -98,9 +98,25 @@ actually got its message types, which is the only way to notice that a file had 
 `Odometry` and been answered, by its own guard, with "no rclpy here. Source a ROS 2 installation" on a
 machine that had one.
 
-Measured with that: **136 passed**, in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the working
-directory. The count grew from 122 over this round in three places, each of which is a hole a bug got through:
+Measured with that: **142 passed**, in a shell with a sourced ROS 2 (Kilted on this machine; the suite is the
+same on any distro that has the message packages) and `ohm_frontier/` as the working directory. The count grew from 122 over this round in three places, each of which is a hole a bug got through:
 the reactive family rewritten around `ways`/`menu`/`opening`/`avoid` (24 tests), the launch files' behaviour
 when a demo needs a goal and a display, and `tools/measure_drive.py` itself — because a document whose numbers
 come from a measuring tool should be able to say the tool measures what it claims, and until this week nothing
 tested it.
+
+## The picture on the front page is a recording, not a drawing
+
+RViz cannot be screenshotted here — there is no display, and `rviz2` aborts with exit -6 when asked for one — so
+`tools/record_view.py` subscribes to the four topics the view itself reads (`/map`, `/frontiers`,
+`/<robot>/odom`, `/tf`) and draws them. The run behind it was 150 s in `rooms`: **19 goals taken, 7 arrived at,
+6 dropped in favour of a bigger clump as the map grew, 2 refused outright** while nav2 was still activating —
+which is the honest shape of an exploration run, and a better first picture than a run where everything worked.
+
+Two things had to be right for the picture to mean anything, and both are tests now (`test_record_view.py`): the
+map and the overlays have to be drawn at **one** scale — the map spends whole pixels per cell, so on a 5 cm grid
+the picture's true scale is 20 px/m whatever the caller asked for, and drawing the track at the asked-for 18
+moves every dot 10 % of the hall away from the wall it was found against — and the frames of a GIF have to share
+one canvas, which is not a GIF nitpick either: the map of a run grows, so the frames really are different sizes,
+and pasting them bottom-left (where the map's own origin is) is what keeps the hall still while the new rooms
+appear at the edge.

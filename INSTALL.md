@@ -15,7 +15,7 @@ that is unusual but harmless. `--apt` and `--pip` print the one command each of 
 ## The four commands a run actually needs
 
 ```bash
-source /opt/ros/kilted/setup.bash        # once per terminal: without it ros2 is not on the PATH
+source /opt/ros/$ROS_DISTRO/setup.bash  # once per terminal: without it ros2 is not on the PATH
 colcon build --symlink-install           # once, and after every change to setup.py
 source install/setup.bash                # so ros2 launch finds ohm_frontier
 ros2 launch ohm_frontier explore.launch.py
@@ -72,6 +72,6 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest test -q     # in ohm_frontier
 
 Ubuntu 24.04, Python 3.12.3, ROS 2 Kilted, 2026-09-14. Everything checked `ok` **except** `rviz2`, which
 is not installed there — the default run therefore opens no view on that machine until
-`sudo apt install ros-kilted-rviz2` has been typed, and `rviz:=false` runs without it. `mecanum_lab` is
+`sudo apt install ros-$ROS_DISTRO-rviz2` has been typed, and `rviz:=false` runs without it. `mecanum_lab` is
 not built as a ROS package there either, which is the expected teaching-machine state and only costs the
 `ros2 launch mecanum_lab …` form of the command.

@@ -294,7 +294,7 @@ library, not in a chat window.
 
 Two further readings, both checked:
 
-* **The shipped behaviour tree**, `/opt/ros/kilted/share/nav2_bt_navigator/behavior_trees/`
+* **The shipped behaviour tree**, `/opt/ros/$ROS_DISTRO/share/nav2_bt_navigator/behavior_trees/`
   (`navigate_to_pose_w_replanning_and_recovery.xml`), read here on ROS 2 Kilted. This is what actually happens
   between "goal sent" and "goal reached": the planner is asked again on a `RateController hz="1.0"`, and the
   recovery round is a `RecoveryNode number_of_retries="6"` around a `RoundRobin` of `Spin` (`spin_dist="1.57"`),
@@ -302,8 +302,8 @@ Two further readings, both checked:
   **no progress or distance term in that tree at all** — nothing in it decides that a goal has stopped being
   approached. It answers the question this repo can only ask from the outside (who gave up on my goal first),
   and it is also why `goal_timeout_s` exists in this node rather than being nav2's job.
-* **`/opt/ros/kilted/share/nav2_msgs/action/NavigateToPose.action`** and
-  **`/opt/ros/kilted/share/slam_toolbox/config/mapper_params_online_async.yaml`** on any lab machine. The
+* **`/opt/ros/$ROS_DISTRO/share/nav2_msgs/action/NavigateToPose.action`** and
+  **`/opt/ros/$ROS_DISTRO/share/slam_toolbox/config/mapper_params_online_async.yaml`** on any lab machine. The
   first is the interface the frontier node writes to, including the `error_code` values and the
   `number_of_recoveries` feedback field; the second is what the mapper's defaults are before this repo
   changes them, and it is the fastest way to see which of this repo's parameters are corrections rather
