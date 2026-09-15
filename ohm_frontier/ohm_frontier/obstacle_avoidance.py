@@ -35,9 +35,14 @@ try:                                    # the field below is importable without 
     from geometry_msgs.msg import Twist
     from rclpy.node import Node
     from sensor_msgs.msg import LaserScan
+    from visualization_msgs.msg import MarkerArray
 except ImportError:                     # so `test_reactive.py` can read the field alone; `main` says so
-    rclpy = Twist = LaserScan = None
+    rclpy = Twist = LaserScan = MarkerArray = None
     Node = object
+
+from . import view_markers as view
+
+from .angles import wrap            # the one place; see `angles.py` on why not three
 
 CLEAR, TURNING, STOPPED = "clear way", "steering around an obstacle", "stopped"
 
@@ -45,17 +50,6 @@ CLEAR, TURNING, STOPPED = "clear way", "steering around an obstacle", "stopped"
 #: forward, y left), the turn, the direction the sum points at — plotting that over a scan is the picture
 #: from the slide — which of the three states this is, and the sentence that says why when it stopped.
 Decision = namedtuple("Decision", "forward sideways turn direction state why")
-
-
-def wrap(angle: float) -> float:
-    """An angle in radians into -π … +π, so that a turn goes the short way round.
-
-    Needed because `atan2` answers in -π … +π while the wanted heading is anywhere: with `drive_heading`
-    at 170° and the field pointing at -170° the difference is 340°, and without this line the robot turns
-    through 340° instead of 20°. This one-liner appears twice in the package, here and in
-    `turn_and_move.py`, on purpose: each of the three reactive examples is meant to be read alone.
-    """
-    return (angle + pi) % (2 * pi) - pi
 
 
 def echoed(r) -> bool:
@@ -153,6 +147,8 @@ class ObstacleAvoidance(Node):
             "stop_gap": 0.55,             # m, where "ahead is blocked" has become "stand still"
             "half_view": 0.35,            # rad, how wide "straight ahead" is
             "period": 0.05,
+            "view": True,                 # the overlay in RViz; `view:=false` stops publishing it
+            "view_topic": "field_view",   # → /field_view, the topic the RViz config lists
         }.items():
             self.declare_parameter(name, value)
 
@@ -168,7 +164,11 @@ class ObstacleAvoidance(Node):
         self.range_max = 8.0
         self.increment = 2 * pi / 360
         self.reported = ""
+        self.scan_frame = f"{robot}/base_link"              # whatever the scan says, once one arrives
 
+        self.view_pub = None
+        if bool(self.get_parameter("view").value) and view.available():
+            self.view_pub = self.create_publisher(MarkerArray, str(self.get_parameter("view_topic").value), 10)
         self.wheels = self.create_publisher(Twist, f"/{robot}/cmd_vel", 10)
         self.create_subscription(LaserScan, f"/{robot}/scan", self.on_scan, 10)
         self.create_timer(float(self.get_parameter("period").value), self.on_timer)
@@ -176,10 +176,56 @@ class ObstacleAvoidance(Node):
             f"pulling the field towards {float(self.get_parameter('drive_heading').value):.0f}° and away "
             f"from anything nearer than {self.settings['repulsion_range']:.1f} m")
 
+    def draw(self, decided: Decision):
+        """The vector field itself — the picture from the slide, drawn from the same arithmetic.
+
+        Every echoed beam nearer than `repulsion_range` gets an arrow pointing back along its own beam, from
+        the shape of the vote `field` uses: `(repulsion_range − r) / r`. The length on screen is that clamped
+        to 40 cm, because a wall at 5 cm votes with a weight of 39 and an arrow of that length would be the
+        only thing on the projector. That clamp is the one cosmetic lie in this drawing, so it is said here
+        rather than discovered by a student: the numbers the robot drives on are `field`'s, and the arrow shows
+        their shape, not their size.
+
+        Then the three results, which is the whole idea in one view. Green is the direction wished for
+        (`drive_heading`); orange is the direction the sum of votes points (`decided.direction`), which is the
+        beam-by-beam vote arriving at an answer; blue is the velocity that goes to the wheels, drawn in the
+        robot's own frame — and a blue arrow that is not the same direction as the nose is a mecanum robot
+        driving sideways, which is the second thing this demo exists to show.
+        """
+        if self.view_pub is None or self.scan is None:
+            return
+        stamp, frame = self.get_clock().now().to_msg(), self.scan_frame
+        near = self.settings["repulsion_range"]
+        votes = []
+        for index, r in enumerate(self.scan.ranges):
+            distance = float(r)
+            if not echoed(r) or distance >= self.range_max or distance >= near:
+                continue
+            angle, push = index * self.increment, (near - distance) / distance
+            length = min(0.4, 0.15 * push)             # the clamp described above, and only ever the clamp
+            votes.append(((distance * cos(angle), distance * sin(angle)),
+                          (distance * cos(angle) - length * cos(angle),
+                           distance * sin(angle) - length * sin(angle))))
+        markers = [view.arrows(frame, stamp, "votes", votes, 0.015, view.RED),
+                   view.arrows(frame, stamp, "aim", [((0.0, 0.0), (cos(self.aim), sin(self.aim)))],
+                               0.03, view.GREEN),
+                   view.arrows(frame, stamp, "field",
+                               [((0.0, 0.0), (cos(decided.direction), sin(decided.direction)))],
+                               0.04, view.ORANGE),
+                   view.arrows(frame, stamp, "command",
+                               [((0.0, 0.0), (2.0 * decided.forward, 2.0 * decided.sideways))],
+                               0.05, view.BLUE)]
+        words = decided.state + (f": {decided.why}" if decided.why else
+                                 f" · field {decided.direction:+.2f} rad · "
+                                 f"{hypot(decided.forward, decided.sideways):.2f} m/s")
+        markers += view.labels(frame, stamp, "numbers", [((0.0, 0.0), words)])
+        view.publish(self.view_pub, markers)
+
     def on_scan(self, msg: LaserScan):
         self.scan = msg
         self.range_max = float(msg.range_max)
         self.increment = float(msg.angle_increment)
+        self.scan_frame = msg.header.frame_id or self.scan_frame
 
     def on_timer(self):
         if self.scan is None:
@@ -189,6 +235,7 @@ class ObstacleAvoidance(Node):
         command.linear.x, command.linear.y, command.angular.z = decided.forward, decided.sideways, \
             decided.turn
         self.wheels.publish(command)
+        self.draw(decided)
         if decided.state != self.reported:                      # one line per change of mind
             self.get_logger().info(
                 decided.state + (f": {decided.why}" if decided.why else

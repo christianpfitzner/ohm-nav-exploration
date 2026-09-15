@@ -28,8 +28,8 @@ from nav_msgs.msg import Odometry, OccupancyGrid            # noqa: E402
 from rclpy.parameter import Parameter                       # noqa: E402
 
 sys.path.insert(0, ".")
-from ohm_frontier.frontier_node import FrontierNode, FRONTIERS_NAMESPACE, \
-    SELECTED_NAMESPACE                                     # noqa: E402
+from ohm_frontier.frontier_node import APPROACH_NAMESPACE, CLOCK_NAMESPACE, FrontierNode, \
+    FRONTIERS_NAMESPACE, SCORES_NAMESPACE, SELECTED_NAMESPACE   # noqa: E402
 from ohm_frontier.frontiers import Frontier                 # noqa: E402
 
 UNKNOWN_CELLS, FREE_CELLS, WALL_CELLS = -1, 0, 100          # slam_toolbox's own convention
@@ -387,14 +387,27 @@ def test_every_candidate_is_drawn_and_the_chosen_one_apart_from_them(node):
     clock = start(node)
     sent = published_markers(node, clock=clock)
     assert sent, "nothing was drawn while the node had a map and a robot"
-    array = sent[-1]
-    by_namespace = {marker.ns: marker for marker in array.markers}
-    assert set(by_namespace) == {FRONTIERS_NAMESPACE, SELECTED_NAMESPACE}, list(by_namespace)
-    candidates, chosen = by_namespace[FRONTIERS_NAMESPACE], by_namespace[SELECTED_NAMESPACE]
+
+    # Namespaces, not markers, are what RViz's checkboxes switch, and one text is one marker in ROS 2 — so the
+    # picture is counted by namespace, which is also the thing the lecturer is switching on and off.
+    by_namespace = {}
+    for marker in sent[-1].markers:
+        by_namespace.setdefault(marker.ns, []).append(marker)
+    assert set(by_namespace) == {FRONTIERS_NAMESPACE, SELECTED_NAMESPACE, SCORES_NAMESPACE,
+                                 CLOCK_NAMESPACE, APPROACH_NAMESPACE}, sorted(by_namespace)
+    candidates, chosen = by_namespace[FRONTIERS_NAMESPACE][0], by_namespace[SELECTED_NAMESPACE][0]
     assert len(candidates.points) == 2, "the hall offers two openings and the picture shows one"
-    assert len(chosen.points) == 1
+    assert len(chosen.points) == 1, "one of them is the goal, and only one may be"
     assert candidates.header.frame_id == chosen.header.frame_id == "slam_map", \
         "the markers are in the frame of the map, which is not assumed anywhere"
+
+    # the namespaces beyond the two dots are the reason the picture is worth opening: the arithmetic, the
+    # clock the goal is running against, and the way it intends to travel
+    written = [marker.text for marker in by_namespace[SCORES_NAMESPACE]]
+    assert len(written) == 2, f"every candidate carries its own numbers, these carry {written}"
+    assert all("cells" in line and "score" in line for line in written), written
+    assert "s left to get nearer" in by_namespace[CLOCK_NAMESPACE][0].text
+    assert len(by_namespace[APPROACH_NAMESPACE][0].points) == 2, "an arrow is two points: the robot and the goal"
 
 
 def test_the_selected_marker_disappears_when_there_is_no_goal(node):
@@ -414,8 +427,10 @@ def test_the_selected_marker_disappears_when_there_is_no_goal(node):
     standing = []
     node.marker_pub.publish = standing.append
     node.publish_markers([])
-    gone = {marker.ns: marker for marker in standing[-1].markers}[SELECTED_NAMESPACE]
-    assert not gone.points and gone.action == gone.DELETEALL, gone
+    gone = [marker for marker in standing[-1].markers if marker.ns == SELECTED_NAMESPACE]
+    assert len(gone) == 1 and not gone[0].points and gone[0].action == gone[0].DELETE, gone[0]
+    assert all(marker.action != marker.DELETEALL for marker in standing[-1].markers), \
+        "DELETEALL would take the candidate dots published earlier in the same array along with the goal"
 
 
 def test_a_map_that_grew_nothing_is_not_mistaken_for_a_new_map(node):

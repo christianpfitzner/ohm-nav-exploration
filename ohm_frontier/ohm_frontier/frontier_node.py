@@ -51,7 +51,7 @@ Five more things are in here because running it showed them:
 from math import atan2, cos, hypot, sin
 
 import rclpy
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult, FloatingPointRange
 from rclpy.action import ActionClient
@@ -73,6 +73,7 @@ try:                                    # to ask the mapper where its map frame 
 except ImportError:
     Buffer = TransformListener = None
 
+from . import view_markers as view
 from .frontiers import DEFAULT_WEIGHTS, Grid, Weights, to_frame
 
 STATUS = {4: "reached", 5: "canceled", 6: "aborted — the stack could not get there"}
@@ -81,13 +82,14 @@ SUCCEEDED = 4                                 # action_msgs/GoalStatus: STATUS_S
 
 REFUSALS_BEFORE_WRITTEN_OFF = 3               # see `give_up`
 
-#: The marker namespaces RViz sorts the picture into, and the sizes and colours that go with them. A
-#: candidate is a dot and the goal it grew into is a bigger dot in a warm colour, which is readable from the
-#: back of a lecture room; the z is above the floor so the dots are not drawn under the map image.
+#: The namespaces RViz sorts the picture into — one per kind of thing this node knows: the candidates, the one
+#: chosen, the arithmetic behind the ranking, the clock the chosen one is running against, and the way it
+#: intends to travel. Namespaces rather than markers because a namespace is what RViz's checkbox switches: the
+#: lecturer keeps the dots and hides the numbers, or the other way round, without restarting anything.
 FRONTIERS_NAMESPACE, SELECTED_NAMESPACE = "frontiers", "selected"
+SCORES_NAMESPACE, CLOCK_NAMESPACE, APPROACH_NAMESPACE = "scores", "clock", "approach"
 CANDIDATE_SCALE, GOAL_SCALE = 0.2, 0.35
 CANDIDATE_COLOUR, GOAL_COLOUR = (0.2, 0.4, 1.0, 0.8), (1.0, 0.55, 0.1, 0.9)
-MARKER_HEIGHT = 0.1
 
 #: The three the ranking trades off, as parameters so they can be turned while the robot is driving.
 WEIGHTS = ("weight_size", "weight_orientation", "weight_distance")
@@ -416,42 +418,44 @@ class FrontierNode(Node):
             .add_done_callback(lambda response: self.on_response(response, attempt))
 
     def publish_markers(self, ranked: list):
-        """Every candidate, and the one being driven to, so the decision can be looked at.
+        """Every candidate with the numbers that ranked it, the one being driven to, and the clock on it.
 
-        The whole ranking goes out on every tick whether or not anything changed, because the picture that is
-        worth something from a lecture chair is the one showing what was *not* chosen. Namespaces are how RViz
-        tells the two displays apart, and the chosen one is deleted rather than left standing when there is no
-        goal — a stale orange dot in the middle of a hall reads as "that is where it is going".
+        The whole ranking goes out on every tick whether or not anything changed, because the picture worth
+        looking at from a lecture chair is the one showing what was *not* chosen, and why. So every candidate
+        carries its own arithmetic as a label — cells, metres, score, the three the weights trade off — and the
+        goal carries how long it has left to be worth keeping, which is the number `goal_timeout_s` is about
+        and the one a student asks about first when the robot refuses to move.
+
+        What can go stale is removed rather than left standing: an orange dot in the middle of a hall reads as
+        "that is where it is going", and that is the one thing in this view that must never be a lie. `DELETE`
+        and not `DELETEALL`, because `DELETEALL` would take the candidate dots published earlier in the same
+        array along with it; the labels need neither, each carrying a one-second lifetime (`view.labels`).
         """
         if self.marker_pub is None:
             return
         frame = self.map_frame or "map"                   # the map's own frame, never assumed
         stamp = self.get_clock().now().to_msg()
-        dots = [(f.x, f.y) for f in ranked]
-        markers = [self._dots(FRONTIERS_NAMESPACE, dots, CANDIDATE_SCALE, CANDIDATE_COLOUR,
-                              Marker.ADD, frame, stamp)]
-        if self.goal is not None:
-            markers.append(self._dots(SELECTED_NAMESPACE, [(self.goal.x, self.goal.y)], GOAL_SCALE,
-                                      GOAL_COLOUR, Marker.ADD, frame, stamp))
-        else:
-            gone = self._dots(SELECTED_NAMESPACE, [], GOAL_SCALE, GOAL_COLOUR, Marker.DELETEALL,
-                              frame, stamp)
-            markers.append(gone)
-        self.marker_pub.publish(MarkerArray(markers=markers))
+        markers = [view.dots(frame, stamp, FRONTIERS_NAMESPACE, [(f.x, f.y) for f in ranked],
+                             CANDIDATE_SCALE, CANDIDATE_COLOUR)] + view.labels(
+            frame, stamp, SCORES_NAMESPACE,
+            [((f.x, f.y), f"cells {f.cells} · {f.distance:.1f} m · score {f.score:.2f}") for f in ranked])
+        if self.goal is None:
+            markers += [view.dots(frame, stamp, SELECTED_NAMESPACE, [], GOAL_SCALE, GOAL_COLOUR,
+                                  action=Marker.DELETE),
+                        view.arrows(frame, stamp, APPROACH_NAMESPACE, [], colour=view.GREEN)]
+            view.publish(self.marker_pub, markers)
+            return
 
-    def _dots(self, namespace: str, points: list, scale: float, colour: tuple, action: int,
-              frame: str, stamp) -> "Marker":
-        """One list-of-spheres marker: the candidates as dots on the floor, at a height above the map."""
-        marker = Marker()
-        marker.header.frame_id, marker.header.stamp = frame, stamp
-        marker.ns, marker.id = namespace, 0
-        marker.type = Marker.SPHERE_LIST
-        marker.action = action
-        marker.pose.orientation.w = 1.0
-        marker.scale.x = marker.scale.y = marker.scale.z = scale
-        marker.color.r, marker.color.g, marker.color.b, marker.color.a = colour
-        marker.points = [Point(x=float(px), y=float(py), z=MARKER_HEIGHT) for px, py in points]
-        return marker
+        x, y, _ = self.pose_on_map()
+        left = float(self.get_parameter("goal_timeout_s").value) - (self.now() - self.progress_since)
+        markers += [view.dots(frame, stamp, SELECTED_NAMESPACE, [(self.goal.x, self.goal.y)],
+                              GOAL_SCALE, GOAL_COLOUR),
+                    view.arrows(frame, stamp, APPROACH_NAMESPACE, [((x, y), (self.goal.x, self.goal.y))],
+                                colour=view.GREEN)] + view.labels(
+            frame, stamp, CLOCK_NAMESPACE,
+            [((self.goal.x, self.goal.y),
+              f"score {self.goal.score:.2f} · {max(left, 0.0):.0f} s left to get nearer")])
+        view.publish(self.marker_pub, markers)
 
     def on_response(self, future, attempt: int):
         """The stack's first word: whether it takes the goal at all, before any driving."""

@@ -47,6 +47,8 @@ except ImportError:                     # so `test_reactive.py` can read the mat
     rclpy = PoseStamped = Twist = Odometry = String = None
     Node = object
 
+from .angles import wrap            # the one place; see `angles.py` on why not three
+
 IDLE, TURNING, STRAIGHT, GOING, ARRIVED = "waiting for a command", "turning", "driving straight", \
     "driving to the goal", "arrived"
 
@@ -55,16 +57,6 @@ IDLE, TURNING, STRAIGHT, GOING, ARRIVED = "waiting for a command", "turning", "d
 #: A controller with an integral has state; keeping it in the return value is what lets all three be pure
 #: functions, and a test can call them as numbers instead of as a node.
 Motion = namedtuple("Motion", "forward sideways turn running error_sum")
-
-
-def wrap(angle: float) -> float:
-    """An angle in radians into -π … +π, so a turn goes the short way round.
-
-    Without it, "from 170° to -170°" is a 340° turn instead of a 20° one — the single most common first bug
-    in a heading controller, and the reason this line is worth reading twice. It appears twice in the
-    package, here and in `obstacle_avoidance.py`, because each reactive example is meant to be read alone.
-    """
-    return (angle + pi) % (2 * pi) - pi
 
 
 def parse_command(text: str):

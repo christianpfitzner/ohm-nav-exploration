@@ -16,6 +16,28 @@
 #                          `selected`, published by frontier_node)
 #   the goal it chose      `/frontier_goal`, the same pose the nav2 action got
 #
+# Then the four overlays that carry the arithmetic, because a marker topic is the only way to put a *reason*
+# on a screen: `/frontiers` also carries the score of every candidate and the countdown of the goal timeout
+# (`frontier_node`), and the three reactive nodes each publish what they sensed, what they wanted and what
+# they commanded — `/wall_view`, `/field_view`, `/move_view` (`view_markers.py` builds all of them, one
+# namespace per kind so each is a checkbox here rather than a code edit). They are all enabled, and they do
+# not fight: only the node actually running has a publisher, an empty topic draws nothing, and the reactive
+# ones live in the robot's own frame while the frontier ones live in the mapper's.
+#
+# The costmaps are the other half of "why did it not go there", and both are latched like `/map`. The global
+# one is drawn at a low alpha over the map, because the lesson is the difference between the two — the free
+# corridor in the map and the no-go band around it in the costmap. The local one is switched off rather than
+# translucent: two costmaps at 30 % over a map is a brown rectangle, and a checkbox is one click.
+#
+# TF is on. It is the display that shows the mapper's correction as a distance — `map → <robot>/odom` is the
+# edge slam_toolbox owns, and watching it grow while the robot drives is the fastest way to make the point
+# that odometry and the hall disagree (`frontiers.py` and `pose_on_map` have the same argument in numbers).
+#
+# One fixed frame, `map`, serves every demo in this package: the simulator publishes `map → <robot>/odom →
+# <robot>/base_link` itself with that edge an identity while nobody else claims it (`robot_frames` and the
+# comment on `map_to_odom` in `mecanum_lab/types.py`), so the reactive launches — no mapper, no planner —
+# still have a tree to draw in.
+#
 # Two QoS settings here are worth the lines they take, because both are the kind that shows up as an empty
 # window rather than as an error. `Reliability Policy: Reliable` on the scan: the simulator publishes
 # standard (reliable) QoS on every topic, `mecanum_lab/ros_bridge.py` says so in its own header, while a
@@ -215,18 +237,96 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /frontier_goal
       Value: true
-    - Class: rviz_default_plugins/TF
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: what the wall follower reads (beams, gap, command)
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /wall_view
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: what the field avoids (votes, wish, sum, command)
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /field_view
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: what the point controller decided (goal, nose, command)
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /move_view
+      Value: true
+    - Alpha: 0.3
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
+      Enabled: true
+      Name: the band nav2 will not cross (global costmap)
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /global_costmap/costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /global_costmap/costmap_updates
+      Use Timestamp: false
+      Value: true
+    - Alpha: 0.5
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
       Enabled: false
+      Name: the 2 m window the controller plans in (local costmap)
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_costmap/costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_costmap/costmap_updates
+      Use Timestamp: false
+      Value: false
+    - Class: rviz_default_plugins/TF
+      Enabled: true
       Frame Timeout: 15
       Frames:
-        All Enabled: false
+        All Enabled: true
       Marker Scale: 1
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: true
       Update Interval: 0
-      Value: false
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 33; 36; 43
@@ -249,7 +349,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 14
+      Distance: 20
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.06
         Stereo Focal Distance: 1

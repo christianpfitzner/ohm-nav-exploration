@@ -22,16 +22,19 @@ nowhere as its own `range_max` unless it was started with `lidar_no_echo:=inf`, 
 and numpy-style `nan` shows up in recordings. All three mean the same thing to this file: no wall there.
 """
 from collections import namedtuple
-from math import pi
+from math import cos, pi, sin
 
 try:                                    # the rule below is importable without ROS, and is tested that way
     import rclpy
     from geometry_msgs.msg import Twist
     from rclpy.node import Node
     from sensor_msgs.msg import LaserScan
+    from visualization_msgs.msg import MarkerArray
 except ImportError:                     # so `test_reactive.py` can read the steering alone; `main` says so
-    rclpy = Twist = LaserScan = None
+    rclpy = Twist = LaserScan = MarkerArray = None
     Node = object
+
+from . import view_markers as view      # the overlay; `view.available()` answers for the import above
 
 AHEAD, RIGHT, RIGHT_AHEAD, RIGHT_BEHIND = 0.0, -pi / 2, -pi / 4, -3 * pi / 4
 FOLLOWING, SEARCHING, BLOCKED = "following", "wall lost — turning until one comes back", "blocked ahead"
@@ -117,6 +120,8 @@ class WallFollower(Node):
             "search_turn": 0.7,           # rad/s while no wall is in sight
             "free_ahead": 0.5,            # m, below this the space ahead counts as blocked
             "period": 0.05,
+            "view": True,                 # the overlay in RViz; `view:=false` stops publishing it
+            "view_topic": "wall_view",    # → /wall_view, the topic the RViz config lists
         }.items():
             self.declare_parameter(name, value)
 
@@ -132,17 +137,57 @@ class WallFollower(Node):
         self.range_max = 8.0
         self.increment = 2 * pi / 360
         self.state = ""
+        self.scan_frame = f"{self.robot}/base_link"       # whatever the scan says it is, once one arrives
 
+        self.view_pub = None
+        if bool(self.get_parameter("view").value) and view.available():
+            self.view_pub = self.create_publisher(MarkerArray, str(self.get_parameter("view_topic").value), 10)
         self.wheels = self.create_publisher(Twist, f"/{self.robot}/cmd_vel", 10)
         self.create_subscription(LaserScan, f"/{self.robot}/scan", self.on_scan, 10)
         self.create_timer(float(self.get_parameter("period").value), self.on_timer)
         self.get_logger().info(f"following the wall on the right at {self.want:.2f} m "
                                f"on /{self.robot}/scan")
 
+    def draw(self, decided: Steering):
+        """The four bearings this rule reads, the gap it is trying to keep, and what it commanded.
+
+        `steer` looks in exactly four directions — `AHEAD`, `RIGHT`, `RIGHT_AHEAD`, `RIGHT_BEHIND` — and a
+        student who does not know that spends the demo guessing why the robot reacts to a shelf it never seems
+        to look at. Each line drawn is as long as the echo that direction returned, in the frame the scan
+        arrived in; the wanted gap `want` is drawn along `RIGHT` on top of the nearest one, so near and far on
+        that one bearing is the error term of the first proportional term, in metres, on the screen.
+
+        The frame comes out of the message rather than from a name written here: the simulator's lidar is a
+        child of `base_link` (`robot_frames` in `mecanum_lab/types.py`), and a marker in a frame nobody
+        publishes is a marker that silently never appears — the least debuggable class of RViz bug there is.
+        """
+        if self.view_pub is None or self.scan is None:
+            return
+        stamp, frame = self.get_clock().now().to_msg(), self.scan_frame
+        seen = [(index * self.increment, float(r)) for index, r in enumerate(self.scan.ranges) if echoed(r)]
+        markers = [view.dots(frame, stamp, "echoes", [(r * cos(a), r * sin(a)) for a, r in seen],
+                             0.03, view.CYAN)]
+        for name, bearing in (("reads_ahead", AHEAD), ("reads_right", RIGHT),
+                              ("reads_right_ahead", RIGHT_AHEAD), ("reads_right_behind", RIGHT_BEHIND)):
+            reach = beam(self.scan.ranges, self.increment, bearing, 2)
+            if reach is not None and reach < self.range_max:
+                markers.append(view.lines(frame, stamp, name,
+                                          [((0.0, 0.0), (reach * cos(bearing), reach * sin(bearing)))],
+                                          0.015, view.WHITE if bearing == AHEAD else view.YELLOW))
+        if decided.wall is not None:
+            markers.append(view.lines(frame, stamp, "wanted",
+                                      [((0.0, 0.0), (self.want * cos(RIGHT), self.want * sin(RIGHT)))],
+                                      0.03, view.BLUE))
+        markers.append(view.arrows(frame, stamp, "command", [((0.0, 0.0), (2.0 * decided.speed, 0.0))],
+                                   0.05, view.ORANGE))
+        markers += view.labels(frame, stamp, "numbers", [((0.0, 0.0), state_line(decided))])
+        view.publish(self.view_pub, markers)
+
     def on_scan(self, msg: LaserScan):
         self.scan = msg
         self.range_max = float(msg.range_max)
         self.increment = float(msg.angle_increment)
+        self.scan_frame = msg.header.frame_id or self.scan_frame
 
     def on_timer(self):
         if self.scan is None:
@@ -151,6 +196,7 @@ class WallFollower(Node):
         command = Twist()
         command.linear.x, command.angular.z = decided.speed, decided.turn
         self.wheels.publish(command)
+        self.draw(decided)
         if decided.state != self.state:                     # one line per state change, not 20 per second
             self.get_logger().info(state_line(decided))
             self.state = decided.state
