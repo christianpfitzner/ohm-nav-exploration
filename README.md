@@ -11,16 +11,22 @@ how candidates are ranked, what Yamauchi's paper says, and where each of its ste
 ohm_frontier/
   ohm_frontier/frontiers.py       the map and the frontier rules — no ROS in here
   ohm_frontier/frontier_node.py   the node: /map and /odom in, a NavigateToPose goal and the frontiers out
-  ohm_frontier/{wall_following,obstacle_avoidance,turn_and_move}.py   the three reactive demos: a lidar and
-                                  a rule, no map, no planner — for the lecture, and launchable on their own
+  ohm_frontier/{wall_following,obstacle_avoidance,turn_and_move,move_to_point}.py   the four control demos: a
+                                  lidar or an odometry and one rule, no map, no planner — for the lecture, and
+                                  launchable on their own
+  ohm_frontier/view_markers.py    what a demo is thinking, as markers: dots, arrows, lines, text, one namespace
+                                  per kind, so each is a checkbox in RViz rather than a code edit
+  ohm_frontier/angles.py          `wrap`, the one angle helper, in one place instead of three
   launch/explore.launch.py        simulator + slam_toolbox + nav2 + RViz + this node, one command
   launch/explore_<hall>.launch.py one per hall worth showing: rooms, maze, open, arena
   launch/explore_no_nav2.launch.py the same run with nothing driving — the decisions on their own
   launch/reactive_<demo>.launch.py hall + one reactive node, for the lecture
+  launch/move_to_point.launch.py  hall + the turn-then-drive controller + the view of it deciding
   launch/frontier.launch.py       this node alone, for when the rest is already running
   config/slam_toolbox.yaml        the mapper: cell size, when a scan is worth adding, loop closure
   config/nav2_rooms.yaml          nav2 for one simulated robot: frames, topics, costmaps
-  config/explore.rviz             the frontier view: map, lidar, trajectory, plan, every frontier, the goal
+  config/explore.rviz             the one view: map, lidar, trajectory, plan, every frontier, the goal, the
+                                  costmaps, TF, and each control demo's own overlay
   test/                           the frontier rules, the life of a goal, the reactive maths, the launch files
 docs/, install.sh, INSTALL.md     the explanation; and ./install.sh --check for what a machine lacks
 ```
@@ -82,9 +88,9 @@ the one that loses shows an empty map while the other one is right.
 | `explore_arena.launch.py` | `arena` | an empty hall whose painted lanes reflect nothing back to the lidar: the map is what the sensors say, not what the world file says |
 | `explore_no_nav2.launch.py` | `rooms` | `nav2:=false` in a file: no planner, no controller, the goals only on `/frontier_goal` and in RViz — the ranking, the timeout and the blacklist in seconds, with nobody to blame |
 
-## Two things that will otherwise bite you
+## Three things that will otherwise bite you
 
-The launch file handles both; **[the simulator's two quirks](docs/frontier-exploration.md#the-simulators-two-quirks)**
+The launch file handles the first two; **[the simulator's two quirks](docs/frontier-exploration.md#the-simulators-two-quirks)**
 has the measurements and the tf diagram.
 
 * **Who publishes the top edge of the tf tree.** The simulator publishes `map → <robot>/odom` too, and two
@@ -96,6 +102,36 @@ has the measurements and the tf diagram.
   what every laboratory there measures — and slam_toolbox cannot use that, because a reading at its
   `max_laser_range` is not "the space beyond is open". Hence `lidar_no_echo:=inf`, which is what
   `sensor_msgs/msg/LaserScan` documents.
+* **An included launch file answers for your arguments.** `lab.launch.py` declares 19 arguments, and an
+  `IncludeLaunchDescription` writes them into the *including* file's configuration space: a file that declares
+  `rviz` with default `true`, includes the simulator with `rviz:=false`, and reads `rviz` afterwards reads
+  `false` — and reads `robots` as empty, though nobody mentioned it. The two launch files here that open a view
+  now decide it *before* the include, and `test_launch_files.py` keeps them in that order, because the failure
+  mode was a default-on RViz that started nothing and printed nothing at all.
+
+## The control examples
+
+Four of them, one file each, one rule per file, each launchable alone in one command — and each drawing what it
+is deciding, on the topics the one view lists.
+
+```bash
+ros2 launch ohm_frontier reactive_wall_follow.launch.py       # follow the wall on the right, rooms
+ros2 launch ohm_frontier reactive_avoid.launch.py             # drive one way, around whatever is there
+ros2 launch ohm_frontier reactive_turn_and_move.launch.py     # turn and drive at once, with a slip check
+ros2 launch ohm_frontier move_to_point.launch.py              # turn FIRST, then drive, with the view open
+ros2 topic pub --once /muster/move_command std_msgs/msg/String "data: 'go 12.0 10.0'"
+```
+
+`move_to_point.py` is the one that is a control example rather than a sensor example: orient until the place is
+inside `aim_tolerance` of the nose, then drive dead straight at it, and re-aim whenever it leaves that cone. Run
+it against `turn_and_move.py` on the same hall with the same place and the difference is the lecture — one stops
+to aim, the other never stops and has to be tuned for it. The numbers worth turning are `aim_tolerance` (0.08 rad
+at 10 m is 80 cm of sideways error it will accept and still call `arrived`; compute it before it moves) and
+`gain_turn` with `turn_limit`, where a proportional turn meets what the wheels can deliver.
+
+It is also the cheapest way to watch the odometry lie: with `slip = 1.0` in the simulator's physics the pose
+integrates metres the robot never drove, and a controller with no sensor finds that out on its own, out loud, by
+re-aiming.
 
 ## What the node decides
 
@@ -153,11 +189,15 @@ cd ohm_frontier && python3 -m pytest test              # the rules, with no ROS 
 One thing costs a student an hour, so it goes here: **in a shell that has ROS sourced that last command dies
 before it collects anything.** ROS 2 Kilted advertises a `launch_testing` pytest plugin whose hook arguments
 the pip pytest here (9.1.1) no longer accepts, so the suite needs `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
-python3 -m pytest test -q` — the same line `./install.sh --check` prints. Measured with that: **78 passed**,
-in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the working directory. What is covered is in the test
-names: the frontier rules, the life of a goal from candidate to blacklist, the reactive maths, and the launch
-files — a launch file being the one kind of file here whose wrong imports were invisible until someone typed
-`ros2 launch`.
+python3 -m pytest test -q` — the same line `./install.sh --check` prints. Measured with that: **91 passed**,
+in a shell with `/opt/ros/kilted` sourced and `ohm_frontier/` as the working directory. What is covered is in the
+test names: the frontier rules, the life of a goal from candidate to blacklist, the reactive maths, the markers
+each demo draws, and the launch files — a launch file being the one kind of file here whose wrong imports were
+invisible until someone typed `ros2 launch`. The two newest of those paid for themselves the day they were
+written: one compares every `executable=` in every launch file against `setup.py`, by globbing rather than by a
+list of names somebody has to remember to extend, and one checks that each ROS-guarded import actually got its
+message types — the only way to notice that a file had asked `sensor_msgs` for `Odometry` and was answered, by
+its own guard, with "no rclpy here. Source a ROS 2 installation" on a machine that had one.
 
 ## What has been run, and what has not — with slam_toolbox and nav2 on ROS 2 Kilted
 
@@ -172,6 +212,18 @@ files — a launch file being the one kind of file here whose wrong imports were
   the whole bringup; the planner's section is named `GridBased` because that is the id the shipped behaviour
   tree asks for; and `spin` is one of the behaviour plugins because the tree builds an action client for it
   at activation.
+
+* **The frontier search costs less than the period it runs in.** A 40 × 60 m hall whose whole boundary is one
+  frontier took 527.6 ms per look-over against the node's 500 ms period — a search that misses every other tick.
+  Now 82.8 ms on a map that changed, and 10.75 ms on one that did not, which is what slam_toolbox actually sends
+  at 2 Hz. Same hall, same map, this machine, `test_frontiers.py` keeping the cache honest.
+* **All four control examples have been driven**, headless in the simulator: `move_to_point` across the `open`
+  hall on a typed goal — 0.37 rad off, one turn on the spot, then 0.30 m/s straight at it, re-aiming as the
+  odometry slipped — and the three overlays are on the wire: `/move_view` in namespaces `aim`, `goal`, `command`,
+  `numbers` in frame `muster/odom`, plus `/wall_view` and `/field_view`.
+* **The view has been seen rendering**: 13 displays over a 30 × 20 m hall, under `Xvfb` with a screenshot, the
+  grid, the robot's trajectory, the lidar, the goal line, the aim line, the command arrow and the phase written
+  over the robot.
 
 Not working yet, measured on this machine:
 

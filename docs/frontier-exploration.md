@@ -239,6 +239,33 @@ instead of assuming any of this.
 launch file also passes `lidar_no_echo:=inf` (`--set sensor.lidar.no_echo=inf`, `mecanum_lab/ros_bridge.py`),
 which is what `sensor_msgs/msg/LaserScan` documents and what the mapper expects.
 
+## And a third thing, which is in the launch files, not in the simulator
+
+`IncludeLaunchDescription` does not scope the arguments it passes. An included launch file declares its
+arguments in **the including file's** configuration space, so a name used by both is the included file's by the
+time the including file reads it again:
+
+```python
+DeclareLaunchArgument("rviz", default_value="true")          # ours: "open the view"
+IncludeLaunchDescription(lab_launch, launch_arguments={"rviz": "false", ...})   # the lab's: "no Pygame-adjacent viewer"
+# …and an OpaqueFunction placed after the include, reading `rviz`, is told 'false'.
+# It is told '' for `robots` too, which nobody mentioned at all.
+```
+
+Measured that way, with a three-entity launch file that prints the value before the include and after it: `true`,
+then `false`. `lab.launch.py` declares nineteen arguments (`BASICS`, in `mecanum-lab/launch/lab.launch.py`) and
+five of them — `world`, `robot`, `headless`, `use_sim_time`, `rviz` — mean something to this package too. Four of
+those five mean the same thing to both files, so the collision is invisible. `rviz` does not: theirs is a viewer
+beside the simulator's window, ours is the frontier view, and it is the argument the whole decision is made of.
+
+So both launch files here that open a view put that decision **before** the include, and
+`test_launch_files.py::test_the_view_is_decided_before_the_simulator_is_allowed_to_answer_for_its_name` keeps
+them there. Worth the ceremony because of the failure mode: with the reading after the include, `rviz:=true`
+starts no viewer, prints no error, and leaves the screen to the simulator's window — the one class of launch bug
+that cannot be diagnosed from the log, because there is nothing in it. If a student writes their own launch file
+that includes the simulator and wonders why their argument stopped working, this is it, and `ros2 launch --show-args`
+shows both files' arguments in one list, which is the same fact seen from the outside.
+
 ## The algorithm in the paper
 
 Brian Yamauchi, *A Frontier-Based Approach for Autonomous Exploration*, Proc. 1997 IEEE International
