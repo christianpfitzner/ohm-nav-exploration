@@ -1,6 +1,7 @@
 """The frontier node alone — for when the simulator and nav2 are already running elsewhere.
 
     ros2 launch ohm_frontier frontier.launch.py robot:=muster
+    ros2 launch ohm_frontier frontier.launch.py scores:=true     # the numbers over the map, as text
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -15,6 +16,10 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("min_frontier_cells", default_value="12"),
         DeclareLaunchArgument("avoid_radius", default_value="0.9"),
+        DeclareLaunchArgument("scores", default_value="false",
+                              description="draw cells, metres and score beside every frontier and the clock "
+                                          "on the goal, as text in the scene; off, because one sentence per "
+                                          "frontier hides the pattern the dots are the picture of"),
         Node(
             package="ohm_frontier", executable="frontier_node", name="frontier_node", output="screen",
             parameters=[{
@@ -24,6 +29,8 @@ def generate_launch_description():
                 "min_frontier_cells": ParameterValue(LaunchConfiguration("min_frontier_cells"),
                                                      value_type=int),
                 "avoid_radius": ParameterValue(LaunchConfiguration("avoid_radius"), value_type=float),
+                # ... and this one is a switch, so it needs the same treatment for the same reason
+                "show_scores": ParameterValue(LaunchConfiguration("scores"), value_type=bool),
             }],
         ),
     ])

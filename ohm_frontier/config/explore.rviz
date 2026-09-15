@@ -13,16 +13,19 @@
 #   map                    the mapper's answer to "what does the hall look like", three states per cell
 #   the trajectory         where this robot has actually been — an Odometry display keeps its last poses
 #   the frontiers          every candidate, `/frontiers` as a MarkerArray (namespaces `frontiers` and
-#                          `selected`, published by frontier_node)
+#                          `selected`, published by frontier_node) — dots, not words: see `scores:=true` below
 #   the goal it chose      `/frontier_goal`, the same pose the nav2 action got
 #
 # Then the four overlays that carry the arithmetic, because a marker topic is the only way to put a *reason*
-# on a screen: `/frontiers` also carries the score of every candidate and the countdown of the goal timeout
-# (`frontier_node`), and the three reactive nodes each publish what they sensed, what they wanted and what
-# they commanded — `/wall_view`, `/field_view`, `/move_view` (`view_markers.py` builds all of them, one
-# namespace per kind so each is a checkbox here rather than a code edit). They are all enabled, and they do
-# not fight: only the node actually running has a publisher, an empty topic draws nothing, and the reactive
-# ones live in the robot's own frame while the frontier ones live in the mapper's.
+# on a screen: `/frontiers` can also carry the score of every candidate and the countdown of the goal timeout,
+# as text, and the three reactive nodes each publish what they sensed, what they wanted and what they
+# commanded — `/wall_view`, `/field_view`, `/move_view` (`view_markers.py` builds all of them, one namespace
+# per kind so each is a checkbox here rather than a code edit). The frontier text is the one thing not sent by
+# default: 0.30 m tall, one sentence per candidate, and it read as a cloud of words over the hall — launch
+# with `scores:=true`, or set the `show_scores` parameter while it runs, to put it back. Everything else here
+# is enabled, and the displays do not fight: only the node actually running has a publisher, an empty topic
+# draws nothing, and the reactive ones live in the robot's own frame while the frontier ones live in the
+# mapper's.
 #
 # The costmaps are the other half of "why did it not go there", and both are latched like `/map`. The global
 # one is drawn at a low alpha over the map, because the lesson is the difference between the two — the free

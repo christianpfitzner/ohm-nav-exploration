@@ -383,7 +383,12 @@ def published_markers(node, ticks: int = 1, clock: "Clock" = None):
 
 def test_every_candidate_is_drawn_and_the_chosen_one_apart_from_them(node):
     """RViz shows all frontiers and the selected one, and the two are namespaces of one topic so a display can
-    be switched without losing the other. The frame is the one the map message carried."""
+    be switched without losing the other. The frame is the one the map message carried.
+
+    What is *not* in the default picture is the text. One sentence per candidate, 0.30 m tall on this view, is
+    a cloud of words flying over the hall — the numbers are a second request away (`scores:=true`, or the
+    `show_scores` box), and the test after this one is about that request.
+    """
     clock = start(node)
     sent = published_markers(node, clock=clock)
     assert sent, "nothing was drawn while the node had a map and a robot"
@@ -393,21 +398,47 @@ def test_every_candidate_is_drawn_and_the_chosen_one_apart_from_them(node):
     by_namespace = {}
     for marker in sent[-1].markers:
         by_namespace.setdefault(marker.ns, []).append(marker)
-    assert set(by_namespace) == {FRONTIERS_NAMESPACE, SELECTED_NAMESPACE, SCORES_NAMESPACE,
-                                 CLOCK_NAMESPACE, APPROACH_NAMESPACE}, sorted(by_namespace)
+    assert set(by_namespace) == {FRONTIERS_NAMESPACE, SELECTED_NAMESPACE, APPROACH_NAMESPACE}, \
+        sorted(by_namespace)
     candidates, chosen = by_namespace[FRONTIERS_NAMESPACE][0], by_namespace[SELECTED_NAMESPACE][0]
     assert len(candidates.points) == 2, "the hall offers two openings and the picture shows one"
     assert len(chosen.points) == 1, "one of them is the goal, and only one may be"
     assert candidates.header.frame_id == chosen.header.frame_id == "slam_map", \
         "the markers are in the frame of the map, which is not assumed anywhere"
 
-    # the namespaces beyond the two dots are the reason the picture is worth opening: the arithmetic, the
-    # clock the goal is running against, and the way it intends to travel
-    written = [marker.text for marker in by_namespace[SCORES_NAMESPACE]]
+    # the ranking is in the picture as geometry: a dot per candidate, a bigger one on the goal, and the way it
+    # intends to travel — everything a lecture points at, and no words over the hall to do it
+    assert len(by_namespace[APPROACH_NAMESPACE][0].points) == 2, "an arrow is two points: the robot and the goal"
+
+
+def test_the_arithmetic_is_there_when_somebody_asks_to_see_it(node):
+    """`show_scores` adds the words to the same picture and changes nothing else.
+
+    The dots are counted, not eyeballed, because a display switch that also moved the geometry would not be a
+    display switch — and because the version of this test that mattered most was the one asserting that the
+    default picture has no text in it at all.
+    """
+    clock = start(node)
+    plain = published_markers(node, clock=clock)[-1]
+    node.set_parameters([Parameter("show_scores", Parameter.Type.BOOL, True)])
+    scored = published_markers(node, clock=clock)[-1]
+
+    def grouped(message):
+        out = {}
+        for marker in message.markers:
+            out.setdefault(marker.ns, []).append(marker)
+        return out
+
+    words, numbers = grouped(plain), grouped(scored)
+    assert set(words) == {FRONTIERS_NAMESPACE, SELECTED_NAMESPACE, APPROACH_NAMESPACE}, sorted(words)
+    assert set(numbers) == set(words) | {SCORES_NAMESPACE, CLOCK_NAMESPACE}, sorted(numbers)
+    assert [p.x for p in words[FRONTIERS_NAMESPACE][0].points] == \
+        [p.x for p in numbers[FRONTIERS_NAMESPACE][0].points], "the dots did not move when the words arrived"
+
+    written = [marker.text for marker in numbers[SCORES_NAMESPACE]]
     assert len(written) == 2, f"every candidate carries its own numbers, these carry {written}"
     assert all("cells" in line and "score" in line for line in written), written
-    assert "s left to get nearer" in by_namespace[CLOCK_NAMESPACE][0].text
-    assert len(by_namespace[APPROACH_NAMESPACE][0].points) == 2, "an arrow is two points: the robot and the goal"
+    assert "s left to get nearer" in numbers[CLOCK_NAMESPACE][0].text
 
 
 def test_the_selected_marker_disappears_when_there_is_no_goal(node):

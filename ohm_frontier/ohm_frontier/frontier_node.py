@@ -46,7 +46,10 @@ Five more things are in here because running it showed them:
 * **Empty is said once.** With nothing left to map, that message would otherwise come twice a second.
 * **Every candidate is drawn, not only the chosen one.** RViz gets the whole ranking every tick, which is the
   question a lecture actually asks: not where is it going, but why that one and not the other four. See
-  `publish_markers`.
+  `publish_markers`. What goes out by default is the *geometry* of that ranking — the dots, the chosen one, the
+  arrow — because the text of it is 0.30 m tall on this view (`view.labels`) and one sentence per candidate is
+  a cloud of words flying over a 22 × 16 m hall. `show_scores` (launch: `scores:=true`) puts the arithmetic
+  back, and the picture it lands on is the same one.
 """
 from math import atan2, cos, hypot, sin
 
@@ -139,6 +142,19 @@ class FrontierNode(Node):
                 description=sentence,
                 floating_point_range=[FloatingPointRange(from_value=0.0, to_value=10.0, step=0.05)]))
         self.add_on_set_parameters_callback(self.weights_changed)
+
+        # Text on this view is metres tall: `view.labels` writes 0.30 m, which is the size a 30 × 20 m hall
+        # reads from the camera `explore.rviz` parks at — and the size at which a sentence stops fitting on
+        # the screen. One of those per candidate, on a map that had 585-cell clumps and more than one of them
+        # within sight, is a cloud of words moving around the room, and it was the first thing anybody
+        # noticed. So the arithmetic is off until asked for, one word at the command line (`scores:=true`) or
+        # one box at a panel. The geometry — every candidate dot, the chosen goal, the arrow to it — is what
+        # the view is for and stays. Described rather than bare because a panel shows the sentence; a bool has
+        # no range to bound, the two states are the whole domain.
+        self.declare_parameter("show_scores", False, ParameterDescriptor(
+            description="draw cells/metres/score over every candidate and the clock over the goal, as text "
+                        "in the scene; off, because a sentence per frontier is a cloud of metres-tall words"))
+        self.add_on_set_parameters_callback(self.scores_changed)
 
         self.robot = str(self.get_parameter("robot").value)
         self.grid = None                      # slam_toolbox's map, as cells
@@ -420,13 +436,19 @@ class FrontierNode(Node):
             .add_done_callback(lambda response: self.on_response(response, attempt))
 
     def publish_markers(self, ranked: list):
-        """Every candidate with the numbers that ranked it, the one being driven to, and the clock on it.
+        """Every candidate, the one being driven to, and the way it intends to travel.
 
         The whole ranking goes out on every tick whether or not anything changed, because the picture worth
-        looking at from a lecture chair is the one showing what was *not* chosen, and why. So every candidate
-        carries its own arithmetic as a label — cells, metres, score, the three the weights trade off — and the
-        goal carries how long it has left to be worth keeping, which is the number `goal_timeout_s` is about
-        and the one a student asks about first when the robot refuses to move.
+        looking at from a lecture chair is the one showing what was *not* chosen, and why. What goes out is the
+        geometry of it — a dot per candidate, a bigger one on the goal, an arrow from the robot to that goal —
+        and nothing else, because text is drawn in metres on this view and a sentence per candidate hides the
+        pattern the dots are the picture of.
+
+        `show_scores` adds the arithmetic back as text: cells, metres and score beside every candidate, and the
+        seconds the goal has left to be worth keeping, which is the number `goal_timeout_s` is about and the
+        one a student asks about first when the robot refuses to move. It is read here rather than remembered,
+        for the same reason the weights are: a value set while the robot is driving is in the next picture
+        without anything having to be restarted.
 
         What can go stale is removed rather than left standing: an orange dot in the middle of a hall reads as
         "that is where it is going", and that is the one thing in this view that must never be a lie. `DELETE`
@@ -437,10 +459,13 @@ class FrontierNode(Node):
             return
         frame = self.map_frame or "map"                   # the map's own frame, never assumed
         stamp = self.get_clock().now().to_msg()
+        show = bool(self.get_parameter("show_scores").value)
         markers = [view.dots(frame, stamp, FRONTIERS_NAMESPACE, [(f.x, f.y) for f in ranked],
-                             CANDIDATE_SCALE, CANDIDATE_COLOUR)] + view.labels(
-            frame, stamp, SCORES_NAMESPACE,
-            [((f.x, f.y), f"cells {f.cells} · {f.distance:.1f} m · score {f.score:.2f}") for f in ranked])
+                             CANDIDATE_SCALE, CANDIDATE_COLOUR)]
+        if show:
+            markers += view.labels(
+                frame, stamp, SCORES_NAMESPACE,
+                [((f.x, f.y), f"cells {f.cells} · {f.distance:.1f} m · score {f.score:.2f}") for f in ranked])
         if self.goal is None:
             markers += [view.dots(frame, stamp, SELECTED_NAMESPACE, [], GOAL_SCALE, GOAL_COLOUR,
                                   action=Marker.DELETE),
@@ -449,14 +474,16 @@ class FrontierNode(Node):
             return
 
         x, y, _ = self.pose_on_map()
-        left = float(self.get_parameter("goal_timeout_s").value) - (self.now() - self.progress_since)
         markers += [view.dots(frame, stamp, SELECTED_NAMESPACE, [(self.goal.x, self.goal.y)],
                               GOAL_SCALE, GOAL_COLOUR),
                     view.arrows(frame, stamp, APPROACH_NAMESPACE, [((x, y), (self.goal.x, self.goal.y))],
-                                colour=view.GREEN)] + view.labels(
-            frame, stamp, CLOCK_NAMESPACE,
-            [((self.goal.x, self.goal.y),
-              f"score {self.goal.score:.2f} · {max(left, 0.0):.0f} s left to get nearer")])
+                                colour=view.GREEN)]
+        if show:
+            left = float(self.get_parameter("goal_timeout_s").value) - (self.now() - self.progress_since)
+            markers += view.labels(
+                frame, stamp, CLOCK_NAMESPACE,
+                [((self.goal.x, self.goal.y),
+                  f"score {self.goal.score:.2f} · {max(left, 0.0):.0f} s left to get nearer")])
         view.publish(self.marker_pub, markers)
 
     def on_response(self, future, attempt: int):
@@ -556,6 +583,24 @@ class FrontierNode(Node):
                        "would choose a new goal every tick again — leave at least one of them above zero")
         for name, value in moved.items():
             self.get_logger().info(f"{name} is now {value:g} — the next decision will be ranked with it")
+        return SetParametersResult(successful=True)
+
+    def scores_changed(self, parameters) -> SetParametersResult:
+        """Say what the view now shows, so switching the numbers has an answer the way a weight has one.
+
+        Nothing is stored and nothing is rebuilt: `publish_markers` asks for the parameter on every tick, which
+        is the whole of what makes it live — the same reason `weights` needs no updating code. Both callbacks
+        are asked about every parameter set, so each answers for its own and says yes to the rest; a second
+        callback rather than a wider `weights_changed`, because refusing a weight and welcoming a label are
+        two different sentences and only one of them has a rule in it.
+        """
+        moved = [p for p in parameters if p.name == "show_scores"]
+        if not moved:
+            return SetParametersResult(successful=True)
+        self.get_logger().info(
+            "the numbers over the map are on again — every candidate will carry its cells, metres and score"
+            if bool(moved[-1].value) else
+            "the numbers over the map are off — the view is candidate dots, the goal and the arrow to it")
         return SetParametersResult(successful=True)
 
     def now(self) -> float:

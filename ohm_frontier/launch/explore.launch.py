@@ -40,6 +40,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 TRUE = ("true", "1", "yes", "on")        # launch arguments arrive as text; "True" and "on" mean the same
 RVIZ_INSTALL_HINT = "sudo apt install ros-$ROS_DISTRO-rviz2"
@@ -117,6 +118,15 @@ def generate_launch_description():
                               description="the mapper; <robot> in it becomes the robot's name"),
         DeclareLaunchArgument("nav2_params", default_value=config("nav2_rooms.yaml"),
                               description="nav2; <robot> in it becomes the robot's name"),
+        # Named `scores` rather than `show_scores` because it is typed at a command line, and named apart from
+        # the simulator's nineteen arguments on purpose: an included launch file writes the arguments *it*
+        # declares into this file's configuration space (see the note on `rviz` below), so a word this file
+        # reads has to be a word only this file declares.
+        DeclareLaunchArgument("scores", default_value="false",
+                              description="draw the numbers over the map — cells, metres and score beside "
+                                          "every frontier, and the clock on the goal; off by default, because "
+                                          "a sentence per frontier is a cloud of metres-tall words over the "
+                                          "hall and the dots already show the ranking"),
     ]
 
     robot, sim, sim_time = (LaunchConfiguration(n) for n in ("robot", "sim_dir", "use_sim_time"))
@@ -137,7 +147,9 @@ def generate_launch_description():
 
     frontiers_node = Node(
         package="ohm_frontier", executable="frontier_node", name="frontier_node", output="screen",
-        parameters=[{"robot": robot, "use_sim_time": sim_time}],
+        parameters=[{"robot": robot, "use_sim_time": sim_time,
+                     # a launch argument arrives as text, and this one is a switch in the node
+                     "show_scores": ParameterValue(LaunchConfiguration("scores"), value_type=bool)}],
     )
 
     # The two includes whose parameters live in a file, and a file has to carry the robot's name in it —
