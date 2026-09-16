@@ -54,6 +54,13 @@ so a second terminal or a script that forgot the line looks exactly like a broke
 `./install.sh --check` sources ROS itself in order to look, and says out loud when the terminal it was
 called from had not.
 
+**It names the ROS 2 it looked at, and two distros on one machine is ordinary.** `/opt/ros` can hold several,
+and only some of them have nav2 on it. This machine's own `--check` says `ROS 2 jazzy … rclpy importable` and
+then four `missing` lines asking for `ros-jazzy-slam-toolbox` and friends — because the nav2, slam_toolbox and
+RViz set here is installed under the *other* prefix, and jazzy is a base install. Read the distro name in the
+first line of the report before apt-ing anything: `--check` will happily find a ROS 2 that cannot run this
+package, because `rclpy` being importable is a different question from `nav2_msgs` being importable.
+
 **The simulator checkout is not where the launch file looks.** The default is `~/git/mecanum-lab`;
 elsewhere it is `MECANUM_LAB=~/somewhere/mecanum-lab ./install.sh --check` or
 `./install.sh --sim-dir=~/somewhere/mecanum-lab`, and the same variable reaches `explore.launch.py`

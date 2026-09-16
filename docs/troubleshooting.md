@@ -69,6 +69,12 @@ gives `odom` two parents; a tf graph with two parents is not a tree, and nav2's 
 simulator's hall coordinates are called `hall` and not `map` — **[the tf diagram and the measurements are
 in the algorithm doc](frontier-exploration.md#the-simulators-two-quirks)**.
 
+The same section covers a second way to get an empty map with nothing wrong in the tf tree: **two viewers**.
+`explore.launch.py` includes the simulator's launch file with `rviz:=false` and starts its own, because two
+viewers both claiming fixed frame `map` is one too many and the one that loses draws an empty map while the
+other one is right. Ask the simulator for its view as well (`rviz:=true` reaches both) and which map you see is
+a race.
+
 ## The map has free space but no unknown, or the mapper never grows
 
 A beam that did not come back is reported by the simulator as the laser's own range, 8.0 m — what every

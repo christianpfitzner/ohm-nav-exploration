@@ -126,6 +126,12 @@ here, and nothing in this package depends on it: the two commands above and a pa
 The ranges are guards as well: a weight
 that rewarded a frontier for being far away is not a ranking, and rclpy refuses the negative number.
 
+The ranking goes out twice a second on `/frontiers` as markers: a ring per clump, a filled dot on the one
+chosen, an arrow to it. The *arithmetic* — a line of text per candidate — is off by default and comes back with
+`scores:=true` on the launch file or `ros2 param set /frontier_node show_scores true` while it drives. Not
+taste: the labels are `view.labels` metres tall, 0.30 m, and a `rooms` map has 21 candidates, which is 21
+sentences of half-metre text over a hall you were trying to look at.
+
 ## When the goal cannot be reached, which it often can't
 
 A frontier is a **direction**, not a place with a route to it. The cell is free and the cell beyond it is
