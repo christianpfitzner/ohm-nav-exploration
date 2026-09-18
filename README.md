@@ -89,15 +89,6 @@ ros2 launch ohm_frontier explore_rooms.launch.py headless:=true rviz:=false
 python3 ohm_frontier/tools/record_view.py muster 150 exploration.gif --every 1.5 --fps 10 --still exploration.png
 ```
 
-## Tests
-
-```bash
-cd ohm_frontier && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest test -q
-```
-
-142, no robot and no hall. The variable is required in a shell that has ROS sourced — see
-[docs/verification.md](docs/verification.md).
-
 ## Detail
 
 | page | |
